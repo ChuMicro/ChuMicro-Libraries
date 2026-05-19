@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chumicro-ntp"
+dynamic = ["version"]
+description = "Runner-shaped SNTP client over an injected UDP socket — pure-Python, cross-runtime."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "ChuMicro" },
+]
+dependencies = [
+    "chumicro-config",
+    "chumicro-sockets",
+    "chumicro-timing",
+]
+keywords = [
+    "circuitpython", "micropython", "microcontroller", "embedded",
+    "esp32", "rp2040", "ntp", "sntp", "time",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: System :: Hardware",
+    "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "chumicro-test-harness",
+    "chumicro-pytest-device",
+    "chumicro-workspace",
+    "chumicro-wifi",
+]
+
+[project.urls]
+Homepage = "https://github.com/ChuMicro/ChuMicro"
+Documentation = "https://chumicro.github.io/ChuMicro/ntp/stable/"
+Source = "https://github.com/ChuMicro/ChuMicro/tree/main/libraries/ntp"
+Issues = "https://github.com/ChuMicro/ChuMicro/issues"
+Bundle = "https://github.com/ChuMicro/ChuMicro-Bundle"
+
+[tool.hatch.version]
+path = "VERSION"
+pattern = "(?P<version>\\S+)"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/", "VERSION", "README.md", "tests/", "examples/", "docs/"]
+exclude = [".gitignore"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chumicro_ntp"]
+
+# ---------------------------------------------------------------------
+# Runtime-config manifest — declares the flat dotted keys this library
+# knows about.  All keys are optional today: NTPClient takes server +
+# port + timeout via constructor args, with sensible defaults
+# (``pool.ntp.org``, port 123, 5 s timeout).  This block describes the
+# forward-looking config-aware surface that an ``NTPClient.from_config``
+# factory will consume.
+
+[tool.chumicro.config]
+required_keys = []
+optional_keys = [
+    "ntp.server",
+    "ntp.port",
+    "ntp.timeout_ms",
+]
+

@@ -1,0 +1,160 @@
+{
+  "libraries": {
+    "chumicro_compat": {
+      "description": "Cross-runtime compatibility polyfills for CircuitPython, MicroPython, and CPython \u2014 functools.partial and more.",
+      "examples": [
+        "compat/examples/partial_basic.py",
+        "compat/examples/partial_callback.py",
+        "compat/examples/partial_keyword_override.py"
+      ],
+      "readme_path": "compat/README.md",
+      "version": "0.2.1"
+    },
+    "chumicro_config": {
+      "description": "Standardized runtime-config helpers for ChuMicro libraries \u2014 section loader + on-device runtime-config reader.",
+      "examples": [
+        "config/examples/end_to_end.py"
+      ],
+      "readme_path": "config/README.md",
+      "version": "0.5.2"
+    },
+    "chumicro_events": {
+      "description": "Runner-shaped pub/sub event bus for chumicro libraries \u2014 bounded, drop-oldest, no chumicro deps.",
+      "examples": [
+        "events/examples/pub_sub_drain.py",
+        "events/examples/wiring_services.py"
+      ],
+      "readme_path": "events/README.md",
+      "version": "0.2.3"
+    },
+    "chumicro_http_server": {
+      "description": "Non-blocking HTTP/1.1 server for CircuitPython, MicroPython, and CPython.",
+      "examples": [
+        "http_server/examples/helpers.py",
+        "http_server/examples/simple_server.py"
+      ],
+      "readme_path": "http_server/README.md",
+      "version": "0.10.2"
+    },
+    "chumicro_kvstore": {
+      "description": "Tiny mutable key-value store for persisted runtime state \u2014 counters, timestamps, tokens \u2014 across CircuitPython, MicroPython, and CPython.",
+      "examples": [
+        "kvstore/examples/boot_counter.py"
+      ],
+      "readme_path": "kvstore/README.md",
+      "version": "0.2.4"
+    },
+    "chumicro_logging": {
+      "description": "Leveled logging for chumicro libraries \u2014 runner-friendly, no chumicro deps.",
+      "examples": [
+        "logging/examples/buffered_runner.py",
+        "logging/examples/stream_handler.py"
+      ],
+      "readme_path": "logging/README.md",
+      "version": "0.2.3"
+    },
+    "chumicro_mqtt": {
+      "description": "Non-blocking MQTT 3.1.1 client (QoS 0+1) for CircuitPython, MicroPython, and CPython.",
+      "examples": [
+        "mqtt/examples/bench.py",
+        "mqtt/examples/bench_host.py",
+        "mqtt/examples/helpers.py",
+        "mqtt/examples/telemetry.py"
+      ],
+      "readme_path": "mqtt/README.md",
+      "version": "0.11.5"
+    },
+    "chumicro_msgpack": {
+      "description": "Compact MessagePack serialization for CircuitPython, MicroPython, and CPython \u2014 delegates to the native C module when available.",
+      "examples": [
+        "msgpack/examples/circuitpython_nvm_settings.py",
+        "msgpack/examples/packb_basic.py",
+        "msgpack/examples/packb_size_comparison.py",
+        "msgpack/examples/stream_roundtrip.py"
+      ],
+      "readme_path": "msgpack/README.md",
+      "version": "0.1.27"
+    },
+    "chumicro_ntp": {
+      "description": "Runner-shaped SNTP client over an injected UDP socket \u2014 pure-Python, cross-runtime.",
+      "examples": [
+        "ntp/examples/helpers.py",
+        "ntp/examples/ntp_query.py"
+      ],
+      "readme_path": "ntp/README.md",
+      "version": "0.8.5"
+    },
+    "chumicro_requests": {
+      "description": "Non-blocking HTTP/1.1 client for CircuitPython, MicroPython, and CPython.",
+      "examples": [
+        "requests/examples/helpers.py",
+        "requests/examples/periodic_get.py"
+      ],
+      "readme_path": "requests/README.md",
+      "version": "0.9.6"
+    },
+    "chumicro_runner": {
+      "description": "Tick-based task runner for CircuitPython, MicroPython, and CPython \u2014 non-blocking check/handle scheduling without async.",
+      "examples": [
+        "runner/examples/basic_handler.py",
+        "runner/examples/circuitpython_blink.py",
+        "runner/examples/circuitpython_button_led.py",
+        "runner/examples/micropython_blink.py",
+        "runner/examples/micropython_button_led.py",
+        "runner/examples/multi_service.py",
+        "runner/examples/periodic_blink.py",
+        "runner/examples/runtime_control.py",
+        "runner/examples/sensor_threshold.py"
+      ],
+      "readme_path": "runner/README.md",
+      "version": "0.3.3"
+    },
+    "chumicro_sockets": {
+      "description": "Cross-runtime TCP + TLS sockets for CircuitPython, MicroPython, and CPython.",
+      "examples": [
+        "sockets/examples/__pycache__/helpers.cpython-314.pyc",
+        "sockets/examples/helpers.py",
+        "sockets/examples/tcp_roundtrip.py",
+        "sockets/examples/tls_with_custom_ca.py",
+        "sockets/examples/udp_echo_client.py"
+      ],
+      "readme_path": "sockets/README.md",
+      "version": "0.6.4"
+    },
+    "chumicro_timing": {
+      "description": "Wraparound-safe millisecond tick helpers and heartbeat scheduling for CircuitPython, MicroPython, and CPython.",
+      "examples": [
+        "timing/examples/circuitpython_blink.py",
+        "timing/examples/circuitpython_debounce.py",
+        "timing/examples/debounce.py",
+        "timing/examples/heartbeat_blink.py",
+        "timing/examples/micropython_blink.py",
+        "timing/examples/micropython_debounce.py",
+        "timing/examples/multiple_heartbeats.py",
+        "timing/examples/periodic_tick.py",
+        "timing/examples/timeout_check.py"
+      ],
+      "readme_path": "timing/README.md",
+      "version": "0.3.2"
+    },
+    "chumicro_websockets": {
+      "description": "Non-blocking WebSocket (RFC 6455) client + server for CircuitPython, MicroPython, and CPython",
+      "examples": [
+        "websockets/examples/client.py",
+        "websockets/examples/helpers.py",
+        "websockets/examples/server.py"
+      ],
+      "readme_path": "websockets/README.md",
+      "version": "0.16.2"
+    },
+    "chumicro_wifi": {
+      "description": "Unified wifi supervisor across CircuitPython, MicroPython, and CPython \u2014 sole-supervisor model with reconnect, state machine, and per-runtime adapters.",
+      "examples": [
+        "wifi/examples/connect_to_ap.py"
+      ],
+      "readme_path": "wifi/README.md",
+      "version": "0.4.2"
+    }
+  },
+  "tag": "2026.05.19"
+}

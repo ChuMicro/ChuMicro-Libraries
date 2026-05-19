@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chumicro-mqtt"
+dynamic = ["version"]
+description = "Non-blocking MQTT 3.1.1 client (QoS 0+1) for CircuitPython, MicroPython, and CPython."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "ChuMicro" },
+]
+dependencies = [
+    "chumicro-config",
+    "chumicro-sockets",
+    "chumicro-timing",
+]
+keywords = [
+    "circuitpython", "micropython", "microcontroller", "embedded",
+    "esp32", "rp2040", "mqtt",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: System :: Hardware",
+    "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "chumicro-test-harness",
+    "chumicro-pytest-device",
+    "chumicro-workspace",
+    "chumicro-wifi",
+]
+
+[project.urls]
+Homepage = "https://github.com/ChuMicro/ChuMicro"
+Documentation = "https://chumicro.github.io/ChuMicro/mqtt/stable/"
+Source = "https://github.com/ChuMicro/ChuMicro/tree/main/libraries/mqtt"
+Issues = "https://github.com/ChuMicro/ChuMicro/issues"
+Bundle = "https://github.com/ChuMicro/ChuMicro-Bundle"
+
+[tool.hatch.version]
+path = "VERSION"
+pattern = "(?P<version>\\S+)"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/", "VERSION", "README.md", "tests/", "examples/", "docs/"]
+exclude = [".gitignore"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chumicro_mqtt"]
+
+[tool.chumicro]
+# Flag this library as flash-mode-only on smaller boards.  Multi-KB
+# MQTT parser + state machine + recv buffers often OOM in RAM mode on
+# Pi Pico W class boards (256 KB MCU class).  ``chumicro-deploy``'s
+# pre-flight check auto-switches RAM-mode deploys to flash when this
+# flag is set.
+requires_flash = true
+
+# ---------------------------------------------------------------------
+# Runtime-config manifest — declares the flat dotted keys this library
+# knows about.  ``chumicro-workspace`` reads it at deploy time to
+# validate the merged user config and to surface the documented
+# vocabulary via tooling.
+#
+# MQTTClient.from_config requires the broker host/port — without
+# them the default socket factory has nowhere to dial.  Identity +
+# auth keys remain optional (sensible defaults; auth omitted means
+# anonymous CONNECT).
+#
+# Callers passing a pre-built ``socket=`` or custom ``socket_factory=``
+# bypass the default factory and don't need ``mqtt.broker.*`` set —
+# but those callers are owning the connection themselves, not asking
+# the library to dial.
+
+[tool.chumicro.config]
+required_keys = [
+    "mqtt.broker.host",
+    "mqtt.broker.port",
+]
+optional_keys = [
+    "mqtt.client_id",
+    "mqtt.keep_alive_seconds",
+    "mqtt.username",
+    "mqtt.password",
+]
+

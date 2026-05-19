@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chumicro-websockets"
+dynamic = ["version"]
+description = "Non-blocking WebSocket (RFC 6455) client + server for CircuitPython, MicroPython, and CPython"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "ChuMicro" },
+]
+keywords = [
+    "circuitpython", "micropython", "microcontroller", "embedded",
+    "esp32", "rp2040",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: System :: Hardware",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "chumicro-config",
+    "chumicro-sockets",
+    "chumicro-timing",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "chumicro-test-harness",
+    "chumicro-pytest-device",
+    "chumicro-workspace",
+    "chumicro-wifi",
+]
+
+[project.urls]
+Homepage = "https://github.com/ChuMicro/ChuMicro"
+Documentation = "https://chumicro.github.io/ChuMicro/websockets/stable/"
+Source = "https://github.com/ChuMicro/ChuMicro/tree/main/libraries/websockets"
+Issues = "https://github.com/ChuMicro/ChuMicro/issues"
+Bundle = "https://github.com/ChuMicro/ChuMicro-Bundle"
+
+[tool.hatch.version]
+path = "VERSION"
+pattern = "(?P<version>\\S+)"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/", "VERSION", "README.md", "tests/", "examples/", "docs/"]
+exclude = [".gitignore"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chumicro_websockets"]
+
+[tool.chumicro]
+# Flag this library as flash-mode-only on smaller boards.  Multi-KB
+# RFC 6455 frame parser + handshake state + recv buffers often OOM in
+# RAM mode on Pi Pico W class boards (256 KB MCU class).
+# ``chumicro-deploy``'s pre-flight check auto-switches RAM-mode
+# deploys to flash when this flag is set.
+requires_flash = true
+
+# ---------------------------------------------------------------------
+# Runtime-config manifest — declares the flat dotted keys this library
+# knows about.  All keys are optional today: WebSocketClient and
+# WebSocketServer take their tunables + connection target via
+# constructor args.  This block describes the forward-looking
+# config-aware surface that ``.from_config`` factories will consume —
+# client connect target + server bind target + per-side message-size
+# caps.
+
+[tool.chumicro.config]
+required_keys = []
+optional_keys = [
+    "websockets.client.connect_url",
+    "websockets.client.max_message_bytes",
+    "websockets.server.host",
+    "websockets.server.port",
+    "websockets.server.max_message_bytes",
+]
+

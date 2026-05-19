@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chumicro-runner"
+dynamic = ["version"]
+description = "Tick-based task runner for CircuitPython, MicroPython, and CPython — non-blocking check/handle scheduling without async."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "ChuMicro" },
+]
+dependencies = [
+    "chumicro-timing",
+]
+keywords = [
+    "circuitpython", "micropython", "microcontroller", "embedded",
+    "esp32", "rp2040", "scheduler", "tick", "task-runner",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: System :: Hardware",
+    "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "chumicro-test-harness",
+    "chumicro-msgpack",
+]
+
+[project.urls]
+Homepage = "https://github.com/ChuMicro/ChuMicro"
+Documentation = "https://chumicro.github.io/ChuMicro/runner/stable/"
+Source = "https://github.com/ChuMicro/ChuMicro/tree/main/libraries/runner"
+Issues = "https://github.com/ChuMicro/ChuMicro/issues"
+Bundle = "https://github.com/ChuMicro/ChuMicro-Bundle"
+
+[tool.hatch.version]
+path = "VERSION"
+pattern = "(?P<version>\\S+)"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/", "VERSION", "README.md", "tests/", "examples/", "docs/"]
+exclude = [".gitignore"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chumicro_runner"]
