@@ -4,6 +4,7 @@ build_response, encode_response."""
 from chumicro_http_server import (
     RequestParser,
     RequestParseState,
+    ServerProtocolError,
     build_response,
     encode_response,
 )
@@ -13,7 +14,7 @@ from chumicro_test_harness.assertions import raises
 class TestRequestParserBodyBufferTiers:
     """Tier 1 (caller-supplied steady buffer, no alloc), Tier 2 (sized
     rebind for bigger-but-allowed bodies), Tier 3 (413 before alloc).
-    Mirrors :class:`chumicro_requests._wire.HttpResponseParser`'s three
+    Mirrors :class:`chumicro_requests._wire.ResponseParser`'s three
     tiers but with HTTP-shaped error semantics at tier 3 — Content-Length
     is always known up-front (no chunked decode), so the sized rebind
     happens at headers-complete time, not lazily per chunk.
@@ -79,8 +80,7 @@ class TestRequestParserBodyBufferTiers:
         # No body_buffer supplied — capacity 0.  First body triggers a
         # sized rebind to the exact Content-Length.  Confirms the
         # constraint: never pre-alloc a default-sized buffer in
-        # standalone use (the on-device fragmentation tests measured
-        # 1024-byte defaults as a regression).
+        # standalone use.
         parser = RequestParser()
         assert parser._body_capacity == 0  # noqa: SLF001
         assert len(parser._body) == 0  # noqa: SLF001
@@ -167,3 +167,36 @@ class TestEncodeResponse:
         wire = encode_response(response)
         assert b"Content-Length: 0\r\n" in wire
         assert wire.endswith(b"\r\n\r\n")
+
+
+class TestEncodeResponseRejectsControlChars:
+    """A handler reflecting request data into a header or the reason must
+    not be able to splice the response with CR / LF / NUL."""
+
+    def test_header_value_with_crlf_rejected(self):
+        response = build_response(
+            200, text="ok", headers=[("X-Echo", "a\r\nX-Injected: 1")],
+        )
+        with raises(ServerProtocolError):
+            encode_response(response)
+
+    def test_header_value_with_nul_rejected(self):
+        response = build_response(200, text="ok", headers=[("X-Echo", "a\x00b")])
+        with raises(ServerProtocolError):
+            encode_response(response)
+
+    def test_header_name_with_newline_rejected(self):
+        response = build_response(200, text="ok", headers=[("X-Bad\nName", "v")])
+        with raises(ServerProtocolError):
+            encode_response(response)
+
+    def test_reason_with_crlf_rejected(self):
+        response = build_response(200, text="ok")
+        response.reason = "OK\r\nX-Injected: 1"
+        with raises(ServerProtocolError):
+            encode_response(response)
+
+    def test_clean_custom_header_still_encodes(self):
+        response = build_response(200, text="ok", headers=[("X-Fine", "value")])
+        wire = encode_response(response)
+        assert b"X-Fine: value\r\n" in wire

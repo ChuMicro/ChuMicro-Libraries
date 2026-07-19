@@ -9,6 +9,7 @@ description = "Non-blocking HTTP/1.1 server for CircuitPython, MicroPython, and 
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "ChuMicro" },
 ]
@@ -69,11 +70,10 @@ requires_flash = true
 
 # ---------------------------------------------------------------------
 # Runtime-config manifest — declares the flat dotted keys this library
-# knows about.  All keys are optional today: HttpServer takes its
-# tunables + bind target via constructor args.  This block describes
-# the forward-looking config-aware surface that an
-# ``HttpServer.from_config`` factory will consume — bind host/port,
-# limits, and optional TLS material paths.
+# knows about.  All keys are optional: HttpServer takes its tunables +
+# bind target via constructor args, and ``HttpServer.from_config`` /
+# ``chumicro_sockets_factory`` read these keys — bind host/port, limits,
+# and optional TLS material paths — each with a constructor default.
 
 [tool.chumicro.config]
 required_keys = []
@@ -83,6 +83,7 @@ optional_keys = [
     "http_server.max_connections",
     "http_server.request_timeout_ms",
     "http_server.max_request_body_bytes",
+    "http_server.stream_buffer_size",
     "http_server.tls.cert_path",
     "http_server.tls.key_path",
 ]

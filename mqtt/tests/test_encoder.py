@@ -1,7 +1,7 @@
 """Tests for the packet encoders."""
 
-from chumicro_mqtt import (
-    UnsupportedQoSError,
+from chumicro_mqtt import UnsupportedQoSError
+from chumicro_mqtt._wire import (
     encode_connect,
     encode_puback,
     encode_publish,
@@ -140,7 +140,7 @@ class TestEncodeUnsubscribe:
 
 
 class TestEncodePuback:
-    def test_canonical_shape(self) -> None:
+    def test_known_encoding(self) -> None:
         packet = encode_puback(packet_id=42)
         assert packet == b"\x40\x02\x00\x2a"
 

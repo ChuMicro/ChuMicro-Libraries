@@ -1,6 +1,8 @@
 """http_server: in-flight observation, caller headers, Request
 object, routing."""
 
+import errno
+
 from chumicro_http_server import (
     CaseInsensitiveDict,
     HttpServer,
@@ -23,12 +25,12 @@ def _make_server(*, sockets, handler=None, **kwargs):
 
     listener_called = {"count": 0}
 
-    def listener_factory():
+    def transport_factory():
         listener_called["count"] += 1
         return FakeListener(sockets)
 
     server = HttpServer(
-        listener_factory=listener_factory,
+        transport_factory=transport_factory,
         handler=handler,
         ticks=ticks,
         **kwargs,
@@ -72,9 +74,10 @@ def _connection(request_bytes):
 class TestHttpServerInFlightObservation:
     def test_in_flight_increments_after_accept(self):
         # Use a stalled socket so the connection sticks around.
-        sock_stalled = type("Stalled", (FakeSocket,), {
-            "recv_into": lambda self, _b, _n=0: (_ for _ in ()).throw(OSError(11, "would block")),
-        })()
+        def _raise_eagain(self, _b, _n=0):
+            raise OSError(errno.EAGAIN, "would block")
+
+        sock_stalled = type("Stalled", (FakeSocket,), {"recv_into": _raise_eagain})()
         server, ticks, _ = _make_server(sockets=[(sock_stalled, ("127.0.0.1", 1))])
         assert server.in_flight == 0
         server.handle(ticks.ticks_ms())
@@ -131,6 +134,20 @@ class TestRequestObject:
         )
         assert request.text() == "café"
 
+    def test_text_honors_content_type_charset(self):
+        # latin-1-encoded body decoded with the latin-1 charset declared
+        # on Content-Type; utf-8 would mojibake "café" here.
+        from chumicro_http_server import Request
+        headers = CaseInsensitiveDict()
+        headers["Content-Type"] = "text/plain; charset=latin-1"
+        request = Request(
+            method="POST", target="/", http_version="HTTP/1.1",
+            headers=headers,
+            body="café".encode("latin-1"),
+            peer=("127.0.0.1", 1),
+        )
+        assert request.text() == "café"
+
     def test_json_decodes(self):
         from chumicro_http_server import Request
         request = Request(
@@ -172,7 +189,7 @@ class TestHttpServerRouting:
     def _route_server(self, sockets, **kwargs):
         ticks = FakeTicks()
         server = HttpServer(
-            listener_factory=lambda: FakeListener(sockets),
+            transport_factory=lambda: FakeListener(sockets),
             ticks=ticks,
             **kwargs,
         )

@@ -1,32 +1,18 @@
-"""Pre-baked broker responses for unit tests.
+"""Pre-baked broker responses and client fixtures for unit tests."""
 
-Tests typically drive :class:`MQTTClient` via a
-:class:`chumicro_sockets.testing.FakeSocket` — script broker
-responses with ``sock.enqueue_recv(canned_connack_bytes())`` etc., let
-the client tick, then assert the wire-format on ``sock.sent``.
-
-These canned-bytes helpers stay in sync with the encoder/decoder so a
-hand-rolled byte literal in a test doesn't drift when the wire format
-gets a tweak.
-"""
-
-#: Test-support: PyPI sdist / wheel only -- bundles and product /
-#: app / functional device deploys exclude it; the on-device unit
-#: sweep is the one path that stages it.
 __chumicro_test_support__ = True
 
 import struct
+
+from chumicro_mqtt.client import MQTTClient
 
 
 def canned_connack_bytes(*, return_code: int = 0, session_present: bool = False) -> bytes:
     """Return the four-byte CONNACK packet for *return_code*.
 
     Args:
-        return_code: 0 = accepted; 1-5 = various rejection reasons
-            per MQTT 3.1.1 §3.2.2.3.  Tests for the rejection path
-            pass non-zero here.
-        session_present: Bit 0 of the ack flags byte.  ``True`` only
-            on a clean_session=False resume.
+        return_code: 0 = accepted; 1-5 = rejection reasons (MQTT 3.1.1 §3.2.2.3).
+        session_present: Bit 0 of the ack flags byte.
     """
     flags = 0x01 if session_present else 0x00
     return bytes((0x20, 0x02, flags, return_code))
@@ -54,12 +40,7 @@ def canned_pingresp_bytes():
 
 
 def canned_publish_bytes(topic, payload, *, qos=0, retain=False, packet_id=None):
-    """Return a PUBLISH packet shaped like the broker would send.
-
-    Mirrors :func:`chumicro_mqtt.encode_publish` but takes the same
-    args downstream tests use.  Keep this in sync with the encoder
-    if you tweak the wire format.
-    """
+    """Return a PUBLISH packet shaped like the broker would send."""
     if isinstance(payload, str):
         payload = payload.encode("utf-8")
     if isinstance(topic, str):
@@ -75,7 +56,7 @@ def canned_publish_bytes(topic, payload, *, qos=0, retain=False, packet_id=None)
             raise ValueError("QoS > 0 PUBLISH requires a packet_id")
         variable_header += struct.pack(">H", packet_id)
     body = variable_header + payload
-    # Variable-length encoding for body length.
+    # Variable-length encoding of the body length.
     remaining_bytes = bytearray()
     value = len(body)
     while True:
@@ -87,3 +68,22 @@ def canned_publish_bytes(topic, payload, *, qos=0, retain=False, packet_id=None)
         if value == 0:
             break
     return bytes((fixed_byte_one,)) + bytes(remaining_bytes) + body
+
+
+def new_client(sock, ticks, **overrides):
+    """Build an MQTTClient against *sock* and *ticks* with test defaults."""
+    kwargs = {
+        "client_id": "test-client",
+        "keep_alive_seconds": 60,
+        "ack_timeout_seconds": 5.0,
+        "publish_retry_max": 2,
+        "ticks": ticks,
+    }
+    kwargs.update(overrides)
+    return MQTTClient(sock, **kwargs)
+
+
+def drive(client, ticks, count=1):
+    """Call ``client.handle(ticks.ticks_ms())`` *count* times in a row."""
+    for _ in range(count):
+        client.handle(ticks.ticks_ms())

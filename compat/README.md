@@ -15,7 +15,7 @@ Import from `chumicro_compat` instead of the stdlib and your code works everywhe
 
 ```bash
 # CircuitPython (after `circup bundle-add ChuMicro/ChuMicro-Bundle`)
-circup install chumicro-compat
+circup install chumicro_compat
 
 # MicroPython
 mpremote mip install github:ChuMicro/ChuMicro-Bundle/chumicro_compat
@@ -64,7 +64,7 @@ The public API (`.func`, `.args`, `.keywords`, `__call__`, `__repr__`) is identi
 
 ## Where this fits
 
-Leaf — no upstream ChuMicro deps.  Used directly by any library or app that wants stdlib features (`functools.partial`, …) missing from CircuitPython / MicroPython.
+Leaf: no upstream ChuMicro deps.  It is a standalone polyfill that no chumicro library currently requires; reach for it in your own code when you want stdlib features (`functools.partial`, …) missing from CircuitPython / MicroPython.
 
 ## Examples
 

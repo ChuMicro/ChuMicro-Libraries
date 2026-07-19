@@ -1,11 +1,16 @@
-"""Public exports for the cross-runtime timing package."""
+"""Wrap-safe millisecond ticks plus wait value objects (``Deadline`` / ``Rate``)."""
 
-from chumicro_timing.heartbeat import Heartbeat
+import gc
+
+from chumicro_timing.deadline import Deadline, Rate
 from chumicro_timing.ticks import ticks_add, ticks_diff, ticks_ms
 
 __all__ = [
-	"Heartbeat",
+	"Deadline",
+	"Rate",
 	"ticks_add",
 	"ticks_diff",
 	"ticks_ms",
 ]
+
+gc.collect()

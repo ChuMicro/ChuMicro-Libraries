@@ -1,62 +1,21 @@
 """requests client: busy-error, timeout, error paths."""
 
+import errno
+
 from chumicro_requests import (
     HttpBusyError,
-    HttpClient,
     HttpError,
     HttpProtocolError,
     HttpTimeoutError,
 )
+from chumicro_requests.testing import (
+    canned_response,
+    drive_until_done,
+    make_client,
+)
 from chumicro_sockets.testing import FakeSocket
 from chumicro_test_harness.assertions import raises
-from chumicro_timing.testing import FakeTicks
 
-
-def make_factory(socket_or_factory):
-    """Return a connection_factory that hands out *socket_or_factory*.
-
-    *socket_or_factory* can be either a single :class:`FakeSocket`
-    (returned every call) or a zero-arg callable that builds a fresh
-    one on demand.
-    """
-    def factory(host, port, use_tls):  # noqa: ARG001 — fake ignores args
-        if callable(socket_or_factory):
-            return socket_or_factory()
-        return socket_or_factory
-
-    return factory
-
-def canned_response(*, status=200, reason="OK", body=b"", extra_headers=()):
-    """Build an HTTP/1.1 response byte-string with Content-Length."""
-    lines = [f"HTTP/1.1 {status} {reason}\r\n".encode("ascii")]
-    lines.append(f"Content-Length: {len(body)}\r\n".encode("ascii"))
-    lines.append(b"Content-Type: text/plain\r\n")
-    for name, value in extra_headers:
-        lines.append(f"{name}: {value}\r\n".encode("ascii"))
-    lines.append(b"\r\n")
-    lines.append(body)
-    return b"".join(lines)
-
-def drive_until_done(client, handle, ticks, *, max_ticks=200, advance_ms=1):
-    """Run handle/check until done; safety-cap at *max_ticks* iterations."""
-    for _ in range(max_ticks):
-        if handle.done:
-            return
-        if client.check(ticks.ticks_ms()):
-            client.handle(ticks.ticks_ms())
-        ticks.advance(advance_ms)
-    raise AssertionError(f"handle never completed within {max_ticks} ticks")
-
-def make_client(*, socket_or_factory=None, **kwargs):
-    """Construct an HttpClient wired to FakeTicks + a FakeSocket factory."""
-    ticks = FakeTicks()
-    socket = socket_or_factory if socket_or_factory is not None else FakeSocket()
-    client = HttpClient(
-        connection_factory=make_factory(socket),
-        ticks=ticks,
-        **kwargs,
-    )
-    return client, ticks, socket
 
 class _StalledRecvSocket(FakeSocket):
     """FakeSocket that always raises EAGAIN on recv_into.
@@ -66,14 +25,13 @@ class _StalledRecvSocket(FakeSocket):
     ``timeout_ms`` budgets.  FakeSocket's default behavior of
     returning 0 on an empty queue is a clean-peer-close signal in
     real socket semantics, which the production client correctly
-    treats as end-of-response.  This subclass is the right fixture
-    for "stalled connection" tests.
+    treats as end-of-response.
     """
 
     def recv_into(self, buffer, nbytes=0):
-        if self._closed:
-            raise OSError(9, "socket closed")
-        raise OSError(11, "would block")
+        if self.closed:
+            raise OSError(errno.EBADF, "socket closed")
+        raise OSError(errno.EAGAIN, "would block")
 
 
 class TestHttpClientBusyError:
@@ -180,11 +138,15 @@ class TestHttpClientErrors:
 
     def test_peer_close_completes_unknown_length_body(self):
         socket = FakeSocket()
-        # No Content-Length → length-unknown body.  FakeSocket returns
-        # 0 once the recv queue drains, which mirrors a clean peer
-        # close — the production client calls feed_eof() and the
-        # parser transitions BODY -> DONE.
+        # No Content-Length means a length-unknown body.  The body
+        # ends on a clean peer FIN, which the production client
+        # detects via ``recv_into() == 0`` and turns into
+        # ``parser.feed_eof()``; the parser then transitions
+        # BODY -> DONE.  ``simulate_peer_close`` signals the FIN once
+        # the queue drains, matching real non-blocking socket
+        # semantics (an empty queue without a FIN raises EAGAIN).
         socket.enqueue_recv(b"HTTP/1.1 200 OK\r\n\r\nstreamed-bytes")
+        socket.simulate_peer_close()
         client, ticks, _ = make_client(socket_or_factory=socket)
         handle = client.get("http://example.test/")
         drive_until_done(client, handle, ticks)
@@ -196,3 +158,25 @@ class TestHttpClientErrors:
         handle = client.get("http://example.test/")
         with raises(HttpError, match="before done"):
             _ = handle.result
+
+
+class SSLWantReadError(OSError):
+    """Mimics ssl.SSLWantReadError: an OSError subclass whose errno is
+    SSL_ERROR_WANT_READ (2), not EAGAIN."""
+
+    def __init__(self) -> None:
+        super().__init__(2, "The operation did not complete (read)")
+
+
+class TestWouldBlockClassification:
+    def test_ssl_want_read_and_ewouldblock_are_would_block(self):
+        from chumicro_requests.client import _EWOULDBLOCK, _is_would_block
+
+        assert _is_would_block(SSLWantReadError()) is True
+        assert _is_would_block(OSError(errno.EAGAIN, "again")) is True
+        assert _is_would_block(OSError(_EWOULDBLOCK, "wouldblock")) is True
+
+    def test_genuine_socket_error_is_not_would_block(self):
+        from chumicro_requests.client import _is_would_block
+
+        assert _is_would_block(OSError(errno.ECONNRESET, "reset")) is False

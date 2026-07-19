@@ -11,7 +11,7 @@ from chumicro_test_harness.assertions import raises
 
 
 class TestEncodeVarlen:
-    def test_canonical_encodings(self) -> None:
+    def test_known_encodings(self) -> None:
         cases = [
             (0, b"\x00"),
             (1, b"\x01"),
@@ -58,8 +58,8 @@ class TestDecodeVarlen:
         assert consumed == 2
 
     def test_varlen_past_4_bytes_raises_protocol_error(self) -> None:
-        # All 4 bytes set the continuation bit — malformed, not
-        # "incomplete".  Must raise, not return (0, 0) and stall.
+        # All 4 bytes set the continuation bit (malformed, not
+        # "incomplete").  Must raise, not return (0, 0) and stall.
         with raises(MQTTProtocolError):
             decode_varlen(memoryview(b"\x80\x80\x80\x80"), 0)
 
@@ -119,7 +119,7 @@ class TestTopicMatches:
             )
 
     def test_hash_must_be_last(self) -> None:
-        # The original client returns False here per spec (#'s only
-        # legal as the LAST level).  Implementation: # in non-final
-        # position is treated as exact-match against literal "#".
+        # Per spec, # is only legal as the LAST topic level.  A # in
+        # non-final position is treated as exact-match against the
+        # literal "#" character.
         assert not topic_matches("a/b", "#/b")

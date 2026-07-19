@@ -38,7 +38,6 @@ class TestCPythonUDP:
             host, port = sock.getsockname()
             assert host == "127.0.0.1"
             assert port > 0  # OS-assigned ephemeral
-            assert sock.fileno() > 0
         finally:
             sock.close()
 
@@ -63,7 +62,7 @@ class TestCPythonUDP:
             receiver.close()
 
     def test_recvfrom_into_truncates_oversized_datagram(self) -> None:
-        """Buffer smaller than datagram → unread tail discarded (UDP)."""
+        """An undersized buffer truncates the datagram (UDP)."""
         sender = udp_socket("127.0.0.1", 0)
         receiver = udp_socket("127.0.0.1", 0)
         try:
@@ -120,16 +119,18 @@ class TestCPythonUDP:
         sock = udp_socket("127.0.0.1", 0)
         sock.close()
         sock.close()  # second close: no exception.
-        # POSIX: a closed socket reports fileno() as -1.  Confirms the
-        # close actually took effect (vs. silently no-oping).
-        assert sock.fileno() == -1
+        # The underlying CPython socket reports fileno() as -1 after
+        # close — confirms the close actually took effect (vs.
+        # silently no-oping).  Unwrap via ``sock``; the chumicro
+        # wrapper itself no longer exposes ``fileno``.
+        assert sock.sock.fileno() == -1
 
     def test_broadcast_flag_sets_so_broadcast(self) -> None:
         """``broadcast=True`` allows sendto to a broadcast address."""
         sock = udp_socket("0.0.0.0", 0, broadcast=True)
         try:
             # Verify SO_BROADCAST is enabled on the underlying socket.
-            value = sock._sock.getsockopt(  # noqa: SLF001 — testing the wrapper
+            value = sock.sock.getsockopt(
                 socket.SOL_SOCKET,
                 socket.SO_BROADCAST,
             )
@@ -140,7 +141,7 @@ class TestCPythonUDP:
     def test_broadcast_default_off(self) -> None:
         sock = udp_socket("0.0.0.0", 0)
         try:
-            value = sock._sock.getsockopt(  # noqa: SLF001 — testing the wrapper
+            value = sock.sock.getsockopt(
                 socket.SOL_SOCKET,
                 socket.SO_BROADCAST,
             )

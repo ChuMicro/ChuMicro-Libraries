@@ -1,21 +1,29 @@
 """On-device reader for ``/runtime_config.msgpack`` (flat dotted-key shape)."""
 
+import errno
+
 from chumicro_msgpack import unpackb
 
 from chumicro_config.section import InvalidConfigType, RuntimeConfig
 
 DEFAULT_RUNTIME_CONFIG_PATH = "/runtime_config.msgpack"
-"""Canonical on-device location — changing this is an ABI break."""
+"""Default on-device location of the runtime config file."""
 
 
 def load_runtime_config(path: str | None = None) -> RuntimeConfig:
-    """Read + decode the deployed runtime config.
+    """Read and decode the deployed runtime config file.
 
-    Raises ``OSError`` if the file is missing, :class:`InvalidConfigType`
-    if the payload isn't a dict or is malformed msgpack (e.g. a
-    power-loss-truncated file — ``unpackb`` rejects bad framing).
-    *path* defaults to :data:`DEFAULT_RUNTIME_CONFIG_PATH` at call time
-    (resolved late so tests can monkey-patch the constant).
+    Args:
+        path: File to read; defaults to
+            :data:`DEFAULT_RUNTIME_CONFIG_PATH`.
+
+    Returns:
+        The decoded config wrapped in a :class:`RuntimeConfig`.
+
+    Raises:
+        OSError: The file is missing or unreadable.
+        InvalidConfigType: The payload is not valid msgpack or does not
+            decode to a dict.
     """
     if path is None:
         path = DEFAULT_RUNTIME_CONFIG_PATH
@@ -42,16 +50,17 @@ def _ensure_config_loaded() -> RuntimeConfig | None:
     if not _config_loaded:
         try:
             _config_cache = load_runtime_config()
-        except OSError:
+        except OSError as error:
+            # A missing file (ENOENT) means "no config"; other OSErrors surface.
+            if error.args and error.args[0] != errno.ENOENT:
+                raise
             _config_cache = None
         _config_loaded = True
     return _config_cache
 
 
 def __getattr__(name: str):
-    # `InvalidConfigType` (file present but malformed) is intentionally
-    # not caught here — corruption is a hard deploy failure, surfaced
-    # loudly rather than silently masked as `config = None`.
+    # Malformed config (InvalidConfigType) is a hard failure, never a silent None.
     if name == "config":
         return _ensure_config_loaded()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

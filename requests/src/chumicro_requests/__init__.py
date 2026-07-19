@@ -1,17 +1,8 @@
-"""Non-blocking HTTP/1.1 client for CircuitPython, MicroPython, and CPython.
+"""Non-blocking HTTP/1.1 client for CircuitPython, MicroPython, and CPython."""
 
-Built on :mod:`chumicro_sockets` (TCP + TLS) and :mod:`chumicro_timing`
-(ticks).  Tick-based runner contract — :meth:`HttpClient.check(now_ms)`
-reports whether work is pending and :meth:`handle(now_ms)` does one
-slice of progress per call, so an LED can keep blinking through a
-request in flight, a TLS handshake, or a stalled-peer timeout.
-
-Not supported: HTTP/1.1 keep-alive, gzip, cookies, streaming uploads,
-multi-in-flight requests on the same client.
-"""
+import gc
 
 from chumicro_requests._wire import (
-    DEFAULT_RECV_BUDGET_PER_TICK,
     CaseInsensitiveDict,
     HttpBusyError,
     HttpError,
@@ -26,15 +17,26 @@ from chumicro_requests._wire import (
     parse_url,
     resolve_redirect_url,
 )
-from chumicro_requests.client import (
-    HttpClient,
-    RequestHandle,
-    Response,
-    WhenOversized,
-)
+
+gc.collect()
+
+
+def __getattr__(name):
+    # Lazy import keeps the ~25 KB client module out of RAM for boards
+    # that use only the wire helpers.
+    if name in ("HttpClient", "RequestHandle", "Response", "WhenOversized"):
+        # Pre-compile sweep; rationale in chumicro_mqtt.__getattr__.
+        gc.collect()
+        import chumicro_requests.client as _client  # noqa: PLC0415
+
+        return getattr(_client, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
-    "DEFAULT_RECV_BUDGET_PER_TICK",
+    # pyright: ignore[reportUnsupportedDunderAll]: HttpClient,
+    # RequestHandle, Response, and WhenOversized are PEP-562 lazy via
+    # __getattr__.
     "CaseInsensitiveDict",
     "HttpBusyError",
     "HttpClient",
@@ -53,3 +55,5 @@ __all__ = [
     "parse_url",
     "resolve_redirect_url",
 ]
+
+gc.collect()

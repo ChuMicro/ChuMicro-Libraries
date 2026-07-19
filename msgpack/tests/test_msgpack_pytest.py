@@ -3,9 +3,9 @@
 These tests exercise overflow paths in the encoder that require 65536+
 element structures.  They are excluded from cross-runtime tests
 (MicroPython / CircuitPython) because the allocations exceed the
-available heap on constrained runtimes — that's why this file is
-named ``_pytest.py`` (CPython-only) rather than the bare ``test_``
-form picked up by the cross-runtime harness.
+available heap on constrained runtimes.  The file is named
+``_pytest.py`` (CPython-only) rather than the bare ``test_`` form
+picked up by the cross-runtime harness.
 
 This file also pins the wire-compatibility contract with PyPI
 ``msgpack`` (see ``test_byte_identity_*`` below).  That contract is
@@ -48,11 +48,7 @@ def test_map_too_long_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Wire-compatibility contract — chumicro_msgpack.packb(obj) must produce
-# bytes byte-for-byte identical to msgpack.packb(obj, use_single_float=True)
-# for any subset-conforming input.  This is what lets the workbench's
-# host-side writer use PyPI msgpack while the device-side reader uses
-# chumicro_msgpack — they share a wire format with zero conversion.
+# Wire-compatibility contract — see module docstring.
 # ---------------------------------------------------------------------------
 
 def _payloads() -> list[object]:

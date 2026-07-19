@@ -78,13 +78,25 @@ def log_transition(old_state, new_state):
 wifi.on_state_change(log_transition)
 ```
 
-A common pattern is to wire this into `chumicro-events`' bus so other services can react:
+Fan-out needs no bus: every registered callback fires on each transition, so each interested component registers its own `on_state_change` handler directly.
 
 ```python
-from chumicro_events import EventBus
+wifi.on_state_change(status_led.on_wifi_state)
+wifi.on_state_change(telemetry.on_wifi_state)
+```
 
-bus = EventBus()
-wifi.on_state_change(bus.publisher("wifi.state"))
+To let a generator task *block* on a one-time transition — the first time the link comes up, say — bridge the callback to a `Signal` and `yield from wait_for(...)` (both in `chumicro_runner.generators`; see the `chumicro-runner` guide) rather than polling `wifi.state`:
+
+```python
+from chumicro_runner.generators import Signal, wait_for
+
+link_up = Signal()
+wifi.on_state_change(lambda old, new: link_up.set(new))
+
+
+def main_run():
+    yield from wait_for(link_up)   # suspend until the next wifi transition
+    ...
 ```
 
 ## Configuration
@@ -96,11 +108,12 @@ wifi.on_state_change(bus.publisher("wifi.state"))
 | `ssid` | ✅ | — | AP SSID. |
 | `password` | ✅ | — | WPA passphrase. |
 | `hostname` | | `None` | Hostname advertised on the AP. |
-| `connect_timeout_ms` | | `15_000` | Per-attempt connect deadline. |
+| `connect_timeout_ms` | | `15_000` | Per-attempt connect deadline — a blocking wait on CircuitPython, the in-flight association poll window on MicroPython. |
 | `reconnect_backoff_start_ms` | | `1_000` | Initial reconnect delay. |
 | `reconnect_backoff_max_ms` | | `60_000` | Exponential-backoff cap. |
-| `reconnect_max` | | `None` (unlimited) | Attempts before entering `FAILED`. |
+| `reconnect_max` | | `None` (unlimited) | Consecutive failed attempts (initial connect + reconnects) before the terminal `FAILED` state. Leave `None` for always-on devices — see below. |
 | `power_save` | | `False` | Leave radio power-save on.  `False` disables it on Pi Pico W (CYW43); ignored on adapters without the knob. |
+| `tx_power_dbm` | | `None` (radio default) | Radio transmit power in dBm.  `None` leaves the firmware default untouched; set a reduced value (e.g. `15`) on boards unstable at full power.  Applied via `wifi.radio.tx_power` (CP) / `sta.config(txpower=…)` (MP); ignored on ports without the knob. |
 
 ```toml
 # Inside your project's runtime config (TOML on disk; deploy-flattened to msgpack on the device).
@@ -112,6 +125,12 @@ power_save = false                  # default; eliminates ~30-100 ms tick spikes
 ```
 
 The `power_save = false` default matters on Pi Pico W: the CYW43 chip's idle power-save mode introduces 30–100 ms tick stalls, which visibly stutter LED-blink rhythms and can break sub-second control loops.
+
+`tx_power_dbm` exists for boards that are unreliable at full transmit power. The canonical case is Unexpected Maker's P4-revision ESP32-S3 boards, which are [vendor-documented unstable](https://help.unexpectedmaker.com/docs/boards/wifi-stability-issues/) at full 20 dBm — dropping to `tx_power_dbm = 15` (~75 %) restores a clean join. This knowledge lives in your deploy config, not in the library: `chumicro-wifi` never inspects the board, it only applies the value you set and leaves the radio at its firmware default when the key is absent.
+
+### `reconnect_max` and the never-restart guarantee
+
+Leaving `reconnect_max` at its `None` default is what lets an unattended device ride out an outage without a reboot: the supervisor retries forever with backoff capped at `reconnect_backoff_max_ms`, so a link that comes back after minutes, hours, or a whole-house power blip is re-established on its own. `FAILED` is a **terminal** state — nothing in the service leaves it — so set a finite `reconnect_max` only when a caller *wants* exhaustion to escalate (e.g. to a hardware watchdog reset or deep-sleep), and remember the count includes the initial connect: a low cap can fail permanently in the power-restore race where the board boots faster than the router. For always-on devices, keep it `None`.
 
 ## Runner integration
 
@@ -140,7 +159,7 @@ The `MpWifiAdapter` auto-detects ESP-IDF vs CYW43 by matching `sys.implementatio
 * **ESP-IDF**: `config(reconnects=0)` after first link, to disable the firmware-level auto-reconnect supervisor — `chumicro-wifi` owns reconnect logic itself.
 * **CYW43**: `config(pm=0xa11140)` at configure time, to disable idle power-save when `power_save=False`.
 
-The underlying MicroPython `network.WLAN` API (`active`, `connect`, `isconnected`, `ifconfig`, `disconnect`) is identical across both wifi chips, so a single adapter handles both.
+The underlying MicroPython `network.WLAN` API (`active`, `connect`, `isconnected`, `ifconfig`) is identical across both wifi chips, so a single adapter handles both.
 
 ## Platform notes
 
@@ -153,6 +172,8 @@ Three runtimes, three different ways an unreachable AP surfaces:
 | MicroPython on CYW43 (Pi Pico W) | Returns immediately, `isconnected()` silently stays `False`, no exception. |
 
 The supervisor handles all three honestly: each adapter checks `isconnected()` after a connect attempt rather than trusting that a non-raising `connect()` succeeded.
+
+On the ESP32-S3, a failed or timed-out `wifi.radio.connect()` leaves the station half-open; re-issuing `connect()` without clearing it makes the retry slow-fail for the whole `connect_timeout_ms` (surfacing as `ConnectionError: Unknown failure 205`) instead of the ~4 s a clean attempt takes, so a single transient RF glitch cascades past the connect budget.  `CpWifiAdapter.connect` therefore calls `wifi.radio.stop_station()` before each fresh attempt (and short-circuits when the radio already reports linked), keeping every attempt independent.  This is an intermittent, RF-marginal failure mode — the chip connects in seconds when the station is clean.
 
 ## Testing with `FakeWifi`
 

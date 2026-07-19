@@ -1,31 +1,9 @@
 """Test helpers for libraries that depend on ``chumicro-wifi``.
 
-Downstream consumers import ``FakeWifi`` rather than inventing
-ad-hoc mocks.
-
-Example::
-
-    from chumicro_wifi.testing import FakeWifi
-    from chumicro_timing.testing import FakeTicks
-
-    fake_ticks = FakeTicks()
-    fake_wifi = FakeWifi(fake_ticks)
-    fake_wifi.set_connect_outcome(True)
-    fake_ticks.advance(0)
-    fake_wifi.tick()
-    assert fake_wifi.state == "connected"
-
-This module hosts both the test fakes (``FakeWifi``,
-``FakeWifiAdapter``) and the CPython-default adapter the production
-``WifiService`` falls back to when no real runtime adapter applies.
-The ``__chumicro_test_support__`` marker below keeps the file out of
-every bundle and every product / app / functional device deploy, so
-the fakes and the CPython-default adapter stay host-side — exactly
-where they're needed (the on-device unit sweep is the one path that
-stages it; CPython is a host-test seam, not a deploy target).
+Hosts the test fakes :class:`FakeWifi` and :class:`FakeWifiAdapter`.
 """
 
-#: Source bundle / sdist only -- never lands on a device.
+# Source bundle / sdist only; never lands on a device.
 __chumicro_test_support__ = True
 
 from chumicro_wifi._adapters.base import WifiAdapter
@@ -34,20 +12,7 @@ from chumicro_wifi.service import WifiService
 
 
 class FakeWifiAdapter(WifiAdapter):
-    """In-memory adapter with explicit hooks for test scenarios.
-
-    The connection lifecycle is driven by:
-
-    * :meth:`set_connect_outcome` — controls what the next
-      :meth:`connect` returns (``True`` for success, ``False`` for
-      a clean refusal, an exception class to raise, or a one-shot
-      sequence via :meth:`set_connect_outcomes`).
-    * :meth:`drop_link` — simulates a link-down event; the next
-      :meth:`is_linked` returns ``False``, triggering the service's
-      reconnect path.
-    * :meth:`record` — every adapter call appends to ``self.calls``
-      so tests can assert call ordering and arguments.
-    """
+    """In-memory adapter with explicit hooks for test scenarios."""
 
     name = "fake"
 
@@ -57,9 +22,11 @@ class FakeWifiAdapter(WifiAdapter):
         self._configured_with = None
         self._connect_outcomes = []
         self._default_connect_outcome = True
+        # Deferred join: connect() returns False, is_linked() flips True after this many polls.
+        self._link_after = None
+        self._pending_polls = 0
+        self.connect_blocks = True
         self.calls = []
-
-    # --- WifiAdapter implementation ----------------------------------
 
     def configure(self, config):
         self._configured_with = config
@@ -67,6 +34,9 @@ class FakeWifiAdapter(WifiAdapter):
 
     def connect(self, config):
         self.calls.append(("connect", config))
+        if self._link_after is not None:
+            self._pending_polls = self._link_after
+            return False
         outcome = self._next_outcome()
         if outcome is True:
             self._linked = True
@@ -74,27 +44,23 @@ class FakeWifiAdapter(WifiAdapter):
         if outcome is False:
             self._linked = False
             return False
-        # Anything else is treated as an exception class.
         raise outcome("simulated connect failure")
 
-    def disconnect(self):
-        self.calls.append(("disconnect",))
-        self._linked = False
-
     def is_linked(self):
+        if self._link_after is not None and self._pending_polls > 0:
+            self._pending_polls -= 1
+            if self._pending_polls == 0:
+                self._linked = True
         return self._linked
 
     def ip(self):
         return self._ip if self._linked else None
 
-    # --- test hooks --------------------------------------------------
-
     def set_connect_outcome(self, outcome: object) -> None:
-        """Control what the next :meth:`connect` call returns / raises.
+        """Control what the next :meth:`connect` call returns or raises.
 
         Args:
-            outcome: ``True`` (success), ``False`` (clean refusal),
-                or an exception class to raise.
+            outcome: ``True`` (success), ``False`` (clean refusal), or an exception class to raise.
         """
         self._default_connect_outcome = outcome
 
@@ -102,16 +68,26 @@ class FakeWifiAdapter(WifiAdapter):
         """Queue a one-shot sequence of outcomes.
 
         Args:
-            outcomes: Iterable of outcome values consumed in order
-                by successive :meth:`connect` calls.  After the
-                queue is drained, falls back to the default set via
-                :meth:`set_connect_outcome`.
+            outcomes: Iterable of outcome values consumed in order, then falls back to the default.
         """
         self._connect_outcomes = list(outcomes)
+
+    def set_connect_blocks(self, blocks: bool) -> None:
+        """Toggle the blocking (CP) vs non-blocking (MP) ``connect`` model."""
+        self.connect_blocks = blocks
+
+    def set_deferred_link(self, *, link_after: int) -> None:
+        """Model a non-blocking join that links after *link_after* polls."""
+        self._link_after = link_after
+        self.connect_blocks = False
 
     def drop_link(self):
         """Simulate a link-down event without disconnecting cleanly."""
         self._linked = False
+
+    def restore_link(self):
+        """Simulate the AP coming back on its own (no ``connect`` call)."""
+        self._linked = True
 
     @property
     def configured_with(self):
@@ -127,18 +103,9 @@ class FakeWifiAdapter(WifiAdapter):
 class FakeWifi(WifiService):
     """``WifiService`` wrapping a :class:`FakeWifiAdapter` for tests.
 
-    Bundles the service + adapter so tests don't have to wire them
-    by hand.  Exposes the adapter's test hooks
-    (``set_connect_outcome``, ``drop_link``, ``calls``) directly on
-    the wrapper for ergonomic use in test code.
-
     Args:
-        ticks: A tick source — typically a
-            :class:`chumicro_timing.testing.FakeTicks` instance the
-            test owns and advances explicitly.
-        config: Optional :class:`WifiConfig`.  When ``None`` a
-            sensible default is used (ssid="testnet",
-            password="password", short backoffs so tests run fast).
+        ticks: A tick source, typically a :class:`chumicro_timing.testing.FakeTicks`.
+        config: Optional :class:`WifiConfig`; ``None`` uses a fast-backoff default.
     """
 
     def __init__(self, ticks: object, *, config: WifiConfig | None = None) -> None:
@@ -153,8 +120,6 @@ class FakeWifi(WifiService):
         super().__init__(config, adapter=self._fake_adapter, ticks=ticks)
         self._ticks_source = ticks
 
-    # --- exposing adapter hooks for test ergonomics ------------------
-
     def set_connect_outcome(self, outcome):
         """Forward to the underlying :class:`FakeWifiAdapter`."""
         self._fake_adapter.set_connect_outcome(outcome)
@@ -167,19 +132,25 @@ class FakeWifi(WifiService):
         """Forward to the underlying :class:`FakeWifiAdapter`."""
         self._fake_adapter.drop_link()
 
+    def restore_link(self):
+        """Forward to the underlying :class:`FakeWifiAdapter`."""
+        self._fake_adapter.restore_link()
+
+    def set_connect_blocks(self, blocks):
+        """Forward to the underlying :class:`FakeWifiAdapter`."""
+        self._fake_adapter.set_connect_blocks(blocks)
+
+    def set_deferred_link(self, *, link_after):
+        """Forward to the underlying :class:`FakeWifiAdapter`."""
+        self._fake_adapter.set_deferred_link(link_after=link_after)
+
     @property
     def calls(self):
-        """List of recorded adapter calls — assertion target for tests."""
+        """List of recorded adapter calls."""
         return self.adapter.calls
 
-    # --- convenience for tick-driven tests ---------------------------
-
     def tick(self):
-        """Run one runner-style ``check`` + ``handle`` cycle.
-
-        Equivalent to the inner loop ``Runner`` would run, but
-        condensed so tests don't need to wire a full ``Runner``.
-        """
+        """Run one runner-style ``check`` + ``handle`` cycle."""
         now = self._ticks_source.ticks_ms()
         if self.check(now):
             self.handle(now)

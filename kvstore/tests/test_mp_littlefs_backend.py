@@ -2,7 +2,7 @@
 
 Exercises the load / save / sync / rename loop without a Pi Pico W.
 The fake mirrors the public ``open`` / ``os.rename`` / ``os.remove``
-/ ``os.sync`` shape MicroPython exposes so the production code
+/ ``os.sync`` interface MicroPython exposes so the production code
 under test runs verbatim.
 
 Hardware-side coverage (real LittleFS on a Pi Pico W flash chip,
@@ -20,7 +20,7 @@ from chumicro_test_harness import raises
 
 
 class _FakeFile:
-    """Minimal file-like that mirrors the ``open()`` return surface.
+    """Minimal file-like that mirrors the ``open()`` return value's interface.
 
     Records every chunk written so tests can inspect the wire bytes,
     plus a ``closed`` flag for cleanup assertions.
@@ -96,7 +96,7 @@ def test_capacity_override_accepted() -> None:
 
 
 def test_path_override_accepted() -> None:
-    """Tests + alternative mount points can override the canonical path."""
+    """Tests + alternative mount points can override the default path."""
     backend = MpLittlefsBackend(path="/other.msgpack", filesystem=_FakeFs())
     assert backend._path == "/other.msgpack"
     assert backend._tmp_path == "/other.msgpack.tmp"
@@ -131,7 +131,7 @@ def test_save_then_load_round_trips() -> None:
 
 
 def test_save_writes_to_canonical_path() -> None:
-    """Verify the bytes land at /_chu_kv.msgpack — guard the wire shape."""
+    """Verify the bytes land at ``/_chu_kv.msgpack``."""
     fake = _FakeFs()
     backend = MpLittlefsBackend(filesystem=fake)
     backend.save(b"hello")
@@ -139,11 +139,11 @@ def test_save_writes_to_canonical_path() -> None:
 
 
 def test_save_uses_tmp_then_rename() -> None:
-    """Atomic-write protocol: write tmp → sync → rename → cleanup tmp."""
+    """Atomic-write protocol: write tmp, sync, rename, cleanup tmp."""
     fake = _FakeFs()
     backend = MpLittlefsBackend(filesystem=fake)
     backend.save(b"payload bytes")
-    # After rename, only the canonical path holds the bytes.
+    # After rename, only the payload path holds the bytes.
     assert "/_chu_kv.msgpack" in fake._store
     assert "/_chu_kv.msgpack.tmp" not in fake._store
 
@@ -189,7 +189,9 @@ def test_save_at_exact_capacity_succeeds() -> None:
 
 
 def test_kvstore_with_mp_littlefs_backend_round_trips_through_reload() -> None:
-    """Full vertical: KVStore → MpLittlefsBackend → fake fs → reload."""
+    """Full vertical: KVStore through MpLittlefsBackend, a fake fs, and
+    back via reload.
+    """
     fake = _FakeFs()
     backend = MpLittlefsBackend(filesystem=fake)
     store = KVStore(backend=backend)
@@ -210,7 +212,7 @@ def test_kvstore_with_mp_littlefs_backend_construction_handles_blank_fs() -> Non
 
 
 def test_kvstore_commit_if_changed_skips_unchanged() -> None:
-    """Wear defense — identical state ⇒ no rename / sync."""
+    """Wear defense: identical state means no rename or sync."""
     fake = _FakeFs()
     backend = MpLittlefsBackend(filesystem=fake)
     store = KVStore(backend=backend)

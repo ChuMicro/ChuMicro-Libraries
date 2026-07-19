@@ -1,6 +1,8 @@
 """Tests for FakeSocket — the in-memory test double."""
 
-from chumicro_sockets.testing import EAGAIN, FakeSocket
+import errno
+
+from chumicro_sockets.testing import FakeSocket
 from chumicro_test_harness.assertions import raises
 
 
@@ -42,16 +44,32 @@ class TestRecvScripting:
         nbytes_first = sock.recv_into(buffer, 3)
         assert nbytes_first == 3
         assert bytes(buffer[:3]) == b"abc"
-        # The tail "def" should still be in the queue.
-        assert sock.pending_recv_chunks == 1
+        # The tail "def" should still be queued for the next read.
         nbytes_second = sock.recv_into(buffer, 8)
         assert nbytes_second == 3
         assert bytes(buffer[:3]) == b"def"
 
-    def test_empty_queue_returns_zero(self) -> None:
+    def test_empty_queue_raises_eagain(self) -> None:
+        """No data on a still-connected socket matches real non-blocking
+        ``recv_into`` semantics on every runtime — raises errno.EAGAIN, never
+        returns 0.  Returning 0 is reserved for a peer FIN."""
         sock = FakeSocket()
         buffer = bytearray(4)
-        assert sock.recv_into(buffer, 4) == 0
+        with raises(OSError) as caught:
+            sock.recv_into(buffer, 4)
+        assert caught.value.args[0] == errno.EAGAIN
+
+    def test_simulate_peer_close_returns_zero_when_queue_drained(self) -> None:
+        """``simulate_peer_close`` flips the contract: once the queue
+        drains, ``recv_into`` returns 0 (clean peer FIN)."""
+        sock = FakeSocket()
+        sock.enqueue_recv(b"last bytes before FIN")
+        sock.simulate_peer_close()
+        buffer = bytearray(64)
+        first = sock.recv_into(buffer, 64)
+        assert first == len(b"last bytes before FIN")
+        # Queue drained; FIN signaled.
+        assert sock.recv_into(buffer, 64) == 0
 
     def test_nbytes_zero_uses_buffer_length(self) -> None:
         sock = FakeSocket()
@@ -73,10 +91,10 @@ class TestEAGAINInjection:
         sock.enqueue_eagain_for_send(2)
         with raises(OSError) as caught_first:
             sock.send(b"x")
-        assert caught_first.value.args[0] == EAGAIN
+        assert caught_first.value.args[0] == errno.EAGAIN
         with raises(OSError) as caught_second:
             sock.send(b"x")
-        assert caught_second.value.args[0] == EAGAIN
+        assert caught_second.value.args[0] == errno.EAGAIN
         # Third send succeeds — the script is exhausted.
         sock.send(b"x")
         assert bytes(sock.sent) == b"x"
@@ -88,7 +106,7 @@ class TestEAGAINInjection:
         buffer = bytearray(16)
         with raises(OSError) as caught:
             sock.recv_into(buffer, 16)
-        assert caught.value.args[0] == EAGAIN
+        assert caught.value.args[0] == errno.EAGAIN
         # Second call returns the queued chunk.
         nbytes_read = sock.recv_into(buffer, 16)
         assert nbytes_read == 5
@@ -125,29 +143,13 @@ class TestBlockingFlags:
         assert sock.blocking is True
         sock.setblocking(False)
         assert sock.blocking is False
-        assert sock.timeout == 0.0
 
     def test_settimeout_none_blocking(self) -> None:
         sock = FakeSocket()
         sock.settimeout(None)
         assert sock.blocking is True
-        assert sock.timeout is None
 
     def test_settimeout_value_non_blocking(self) -> None:
         sock = FakeSocket()
         sock.settimeout(2.5)
         assert sock.blocking is False
-        assert sock.timeout == 2.5
-
-
-class TestFileno:
-    def test_default_fileno_is_positive_int(self) -> None:
-        sock = FakeSocket()
-        assert sock.fileno() > 0
-
-    def test_set_fileno_overrides(self) -> None:
-        sock = FakeSocket()
-        sock.set_fileno(42)
-        assert sock.fileno() == 42
-        sock.set_fileno(-1)  # CP-radio-fake convention
-        assert sock.fileno() == -1

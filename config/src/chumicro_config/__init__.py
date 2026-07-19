@@ -1,13 +1,11 @@
-"""Runtime-config helpers — section loader + on-device reader.
+"""Runtime-config helpers: section loader and on-device reader.
 
-Apps import :data:`config` (lazy-loaded ``/runtime_config.msgpack``,
-or ``None`` when absent) or :func:`load_runtime_config` for the
-explicit read.  Library authors use :func:`load_section` /
-:func:`try_load_section` to build typed ``<Name>Config`` instances.
-Patterns and exceptions live in ``docs/guide.md``.
+The public entry points are :data:`config`, :func:`load_runtime_config`,
+:func:`load_section`, and :func:`try_load_section`.
 """
 
-from chumicro_config.runtime import DEFAULT_RUNTIME_CONFIG_PATH, load_runtime_config
+import gc
+
 from chumicro_config.section import (
     ConfigError,
     InvalidConfigType,
@@ -18,12 +16,13 @@ from chumicro_config.section import (
 )
 
 __all__ = [
-    "DEFAULT_RUNTIME_CONFIG_PATH",
+    # pyright: ignore[reportUnsupportedDunderAll]: the runtime symbols
+    # below are PEP-562 lazy via __getattr__.
     "ConfigError",
     "InvalidConfigType",
     "MissingConfigKey",
     "RuntimeConfig",
-    "config",  # pyright: ignore[reportUnsupportedDunderAll]  # PEP-562 lazy via __getattr__ below.
+    "config",
     "load_runtime_config",
     "load_section",
     "try_load_section",
@@ -31,9 +30,20 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """Lazy-load ``config`` on first access (PEP 562 — see runtime module)."""
+    # Lazy imports keep runtime (and chumicro_msgpack) out of RAM until used.
     if name == "config":
         from chumicro_config.runtime import config  # noqa: PLC0415
 
         return config
+    if name == "load_runtime_config":
+        from chumicro_config.runtime import load_runtime_config  # noqa: PLC0415
+
+        return load_runtime_config
+    if name == "runtime":
+        import chumicro_config.runtime as runtime_module  # noqa: PLC0415
+
+        return runtime_module
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+gc.collect()

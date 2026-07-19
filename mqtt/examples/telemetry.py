@@ -3,11 +3,11 @@
 Brings wifi up via the local ``helpers`` module, connects to a
 configured MQTT broker, publishes a synthetic reading to ``<topic>``
 every ``PUBLISH_INTERVAL_S`` seconds with QoS 1.  Subscribes to a
-control topic alongside so the device receives commands inbound —
+control topic alongside so the device receives commands inbound as
 round-trip proof, not publish-only fire-and-forget.
 
 Demonstrates the runner-shaped client driving real MQTT traffic
-while a simple LED-style counter keeps incrementing — proof that
+while a simple LED-style counter keeps incrementing as proof that
 the in-flight publish never block-calls the loop while waiting
 for PUBACK.
 
@@ -28,7 +28,7 @@ deploy pipeline) via the flat-key API:
 
 When ``runtime_config.msgpack`` isn't present (raw single-file
 deploys), wifi creds fall back to the placeholder constants below
-— edit them first.  The MQTT broker has no fallback: set
+(edit them first).  The MQTT broker has no fallback: set
 ``BROKER_HOST`` and ``BROKER_PORT`` (raw deploy) or
 ``mqtt.broker.host`` / ``mqtt.broker.port`` in your
 ``runtime_config.msgpack`` (workspace deploy) before running.  The
@@ -51,7 +51,7 @@ Example output::
     [rx]  chumicro-demo/cmd <- b'ping'
 """
 
-#: Cross-runtime — wifi-up via :mod:`helpers` dispatches per
+#: Cross-runtime: wifi-up via :mod:`helpers` dispatches per
 #: ``sys.implementation.name`` (CP / MP) and the MQTT client is
 #: pure-Python.  The marker tells :func:`scripts.verify_examples`
 #: + ``deploy-example`` to allow this file on either runtime.
@@ -61,12 +61,12 @@ import json
 import math
 import time
 
-from chumicro_mqtt import MQTTClient, ProtocolState
+from chumicro_mqtt import MQTTClient
 from helpers import runtime_config, ticks_add, ticks_diff, ticks_ms, wifi_up
 
-WIFI_SSID = "your-wifi-ssid"  # noqa: S105 — replace before deploying
-WIFI_PASSWORD = "your-wifi-password"  # noqa: S105 — replace before deploying
-BROKER_HOST = ""  # required for raw single-file deploys; e.g. "10.0.0.5"
+WIFI_SSID = "your-wifi-ssid"  # noqa: S105 - replace before deploying
+WIFI_PASSWORD = "your-wifi-password"  # noqa: S105 - replace before deploying
+BROKER_HOST = ""  # required for raw single-file deploys, e.g. "10.0.0.5"
 BROKER_PORT = 1883
 TOPIC = "chumicro-demo/telemetry"
 COMMAND_TOPIC = "chumicro-demo/cmd"
@@ -81,7 +81,7 @@ topic = config.get("telemetry.topic", TOPIC)
 command_topic = config.get("telemetry.command_topic", COMMAND_TOPIC)
 sensor_id = config.get("telemetry.sensor_id", SENSOR_ID)
 
-# Resolve broker host/port from config first, then example constants —
+# Resolve broker host/port from config first, then example constants.
 # MQTTClient.from_config refuses to construct without them, so the
 # dial-target is loud, not implicit.
 if "mqtt.broker.host" not in config:
@@ -100,33 +100,26 @@ def on_message(topic, payload):
     print(f"[rx]  {topic} <- {payload!r}")
 
 
+def on_connect():
+    # Connect-time setup, fired once the broker session is up: subscribe
+    # to the command topic.  (subscribe() requires CONNECTED — publish()
+    # instead buffers pre-connect, so the loop below can publish without
+    # waiting.)
+    print(f"MQTT_CONNECTED broker={config['mqtt.broker.host']}:{config['mqtt.broker.port']}")
+    mqtt.subscribe(command_topic, qos=1)
+    print(f"Subscribed to {command_topic}")
+
+
 mqtt.on_message = on_message
+mqtt.on_connect = on_connect
 mqtt.connect()
-
-
-def _drive_until(predicate, deadline_ms):
-    deadline = ticks_add(ticks_ms(), deadline_ms)
-    while not predicate():
-        if ticks_diff(deadline, ticks_ms()) <= 0:
-            return False
-        if mqtt.check(ticks_ms()):
-            mqtt.handle(ticks_ms())
-        time.sleep(0.02)
-    return True
-
-
-if not _drive_until(lambda: mqtt.state == ProtocolState.CONNECTED, 15_000):
-    print("STATUS: FAIL_MQTT_CONNECT")
-    raise SystemExit(1)
-
-print(f"MQTT_CONNECTED broker={config['mqtt.broker.host']}:{config['mqtt.broker.port']}")
-
-mqtt.subscribe(command_topic, qos=1)
-print(f"Subscribed to {command_topic}")
+# No drive-until-connected gate: the first publish below buffers in the
+# client's pre-connect queue (when_disconnected="queue", the default)
+# and the publish loop drives the connection up and flushes it.
 
 
 def _synthetic_reading(elapsed_seconds: float) -> float:
-    """Synthetic sine-wave reading; replace with your real sensor."""
+    """Synthetic sine-wave reading.  Replace with your real sensor."""
     return round(20.0 + 5.0 * math.sin(elapsed_seconds / 30.0), 2)
 
 
@@ -143,11 +136,18 @@ while True:
     })
 
     publish_done = [False]
+
+    def _on_publish(_topic, _payload, flag=publish_done):
+        # flag[0] = True as a statement: CircuitPython / MicroPython don't
+        # expose list.__setitem__ as an attribute, so the lambda form
+        # (flag.__setitem__(0, True)) raises AttributeError on-device.
+        flag[0] = True
+
     mqtt.publish(
         topic,
         payload.encode(),
         qos=1,
-        on_publish=lambda _packet_id, flag=publish_done: flag.__setitem__(0, True),
+        on_publish=_on_publish,
     )
 
     led_counter = 0

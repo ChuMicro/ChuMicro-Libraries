@@ -7,11 +7,11 @@ publish/subscribe scenarios.
 
 Catches regressions the FakeSocket suite can't see:
 
-* Real broker timing — does the tick-based handle() loop converge
+* Real broker timing.  Does the tick-based handle() loop converge
   fast enough that PUBACKs arrive within the 5 s ack timeout?
-* Real wire format — every packet we send must be acceptable to a
+* Real wire format.  Every packet we send must be acceptable to a
   real MQTT 3.1.1 broker, not just our own decoder.
-* Concurrent subscribers — the same client both publishes AND
+* Concurrent subscribers.  The same client both publishes AND
   receives messages from itself, exercising the loop in both
   directions in one process.
 
@@ -22,15 +22,15 @@ Why ``_pytest`` (CPython-only)
 
 Spawning the Mosquitto subprocess requires :mod:`subprocess` (not on
 MicroPython / CircuitPython) and :mod:`shutil.which` (same).  The
-*test logic itself* — driving the chumicro-mqtt client against a
-real broker — could in principle run on the unix-port if a host-side
+*test logic itself* (driving the chumicro-mqtt client against a
+real broker) could in principle run on the unix-port if a host-side
 wrapper spun up the broker first and handed the port number to the
 unix-port test.  Worth doing if cross-runtime broker coverage
-becomes valuable; today FakeSocket coverage + the on-device
+becomes valuable.  Today FakeSocket coverage + the on-device
 functional tests (real broker over real wifi) are sufficient.
 """
 
-#: CPython-only lane (pytest fixtures / host stdlib); not cross-runtime.
+#: CPython-only lane (pytest fixtures / host stdlib).  Not cross-runtime.
 __chumicro_runtimes__ = ("cpython",)
 
 import shutil
@@ -40,11 +40,11 @@ import time
 from typing import TYPE_CHECKING
 
 import pytest
-from chumicro_mqtt import MQTTClient, ProtocolState
-from chumicro_sockets import tcp_client_socket
+from chumicro_mqtt import MQTTClient, ProtocolState, topic_matches
+from chumicro_runner import IO_WRITE
 from chumicro_timing import ticks_ms
 
-if TYPE_CHECKING:  # pragma: no cover — type-only
+if TYPE_CHECKING:  # pragma: no cover - type-only
     pass
 
 
@@ -81,7 +81,7 @@ def mosquitto_broker(tmp_path_factory: pytest.TempPathFactory):
     """Spawn a Mosquitto broker on a free loopback port.
 
     Skips the whole module when Mosquitto isn't on PATH.  Yields the
-    port; tears down by signaling SIGTERM and reaping.
+    port.  Tears down by signaling SIGTERM and reaping.
     """
     if shutil.which("mosquitto") is None:
         pytest.skip("mosquitto not on PATH — skipping live broker tests")
@@ -96,10 +96,10 @@ def mosquitto_broker(tmp_path_factory: pytest.TempPathFactory):
         f"log_dest file {workdir}/broker.log\n",
     )
     # Mosquitto 2.0 on macOS fails with "Out of memory" when it
-    # tries to setrlimit(RLIMIT_NOFILE) above the soft limit; on
+    # tries to setrlimit(RLIMIT_NOFILE) above the soft limit.  On
     # Apple Silicon this happens at default.  Drop the soft limit
     # in the child via preexec_fn before exec().
-    def _reduce_fd_limit() -> None:  # pragma: no cover — runs in spawned child
+    def _reduce_fd_limit() -> None:  # pragma: no cover - runs in spawned child
         import resource  # noqa: PLC0415
 
         resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
@@ -108,7 +108,7 @@ def mosquitto_broker(tmp_path_factory: pytest.TempPathFactory):
         ["mosquitto", "-c", str(config_path)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        preexec_fn=_reduce_fd_limit,  # noqa: PLW1509 — needed for macOS rlimit quirk
+        preexec_fn=_reduce_fd_limit,  # noqa: PLW1509 - needed for macOS rlimit quirk
     )
     if not _wait_until_listening(port):
         process.terminate()
@@ -133,7 +133,8 @@ def mosquitto_broker(tmp_path_factory: pytest.TempPathFactory):
 
 
 def _new_client(broker_port: int, client_id: str) -> MQTTClient:
-    sock = tcp_client_socket("127.0.0.1", broker_port)
+    # Host-side CPython test: stdlib connect is the one-shot form here.
+    sock = socket.create_connection(("127.0.0.1", broker_port))
     sock.setblocking(False)
     return MQTTClient(
         sock,
@@ -155,7 +156,7 @@ def _drive_until(
         client.handle(ticks_ms())
         if predicate():
             return True
-        time.sleep(0.005)  # 5 ms per tick — fast enough for tests
+        time.sleep(0.005)  # 5 ms per tick, fast enough for tests
     return False
 
 
@@ -176,7 +177,7 @@ class TestConnectAgainstMosquitto:
 
 class TestPublishSubscribe:
     def test_qos0_round_trip(self, mosquitto_broker: int) -> None:
-        """Same client publishes + subscribes — sees its own message."""
+        """Same client publishes + subscribes.  Sees its own message."""
         client = _new_client(mosquitto_broker, "test-qos0")
         client.connect()
         assert _drive_until(client, lambda: client.state == ProtocolState.CONNECTED)
@@ -230,7 +231,7 @@ class TestPublishSubscribe:
         client.disconnect()
 
     def test_concurrent_qos1_publishes(self, mosquitto_broker: int) -> None:
-        """Two QoS 1 publishes in flight at once — both PUBACKs fire callbacks."""
+        """Two QoS 1 publishes in flight at once.  Both PUBACKs fire callbacks."""
         client = _new_client(mosquitto_broker, "test-qos1-concurrent")
         client.connect()
         assert _drive_until(client, lambda: client.state == ProtocolState.CONNECTED)
@@ -255,17 +256,24 @@ class TestPublishSubscribe:
         client.disconnect()
 
 
-class TestPatternHandlers:
-    def test_pattern_handler_dispatches(self, mosquitto_broker: int) -> None:
+class TestTopicMatching:
+    def test_on_message_with_topic_matches(self, mosquitto_broker: int) -> None:
+        """on_message + public topic_matches() route inbound by pattern.
+
+        Replaces the deleted pattern-handler router: the caller filters
+        in on_message with the public matcher.
+        """
         client = _new_client(mosquitto_broker, "test-pattern")
         client.connect()
         assert _drive_until(client, lambda: client.state == ProtocolState.CONNECTED)
 
         sensors: list[str] = []
-        client.add_pattern_handler(
-            "sensors/+/temperature",
-            lambda topic, payload: sensors.append(topic),
-        )
+
+        def route(topic: str, _payload: bytes) -> None:
+            if topic_matches(topic, "sensors/+/temperature"):
+                sensors.append(topic)
+
+        client.on_message = route
         client.subscribe("sensors/#", qos=0)
         assert _drive_until(client, lambda: client.state == ProtocolState.CONNECTED)
 
@@ -273,15 +281,15 @@ class TestPatternHandlers:
         client.publish("sensors/kitchen/humidity", b"45", qos=0)
         # Driving for ~1s gives both inbound messages time to land.
         assert _drive_until(client, lambda: sensors, timeout_seconds=3.0)
-        # Only the temperature message hit the handler (humidity
-        # didn't match the pattern).
+        # Only the temperature message matched the pattern (humidity
+        # didn't).
         assert sensors == ["sensors/back-porch/temperature"]
         client.disconnect()
 
 
 class TestRetainedMessages:
     def test_retain_and_replay(self, mosquitto_broker: int) -> None:
-        """Publish retain=True; a fresh subscriber gets the retained payload."""
+        """Publish retain=True.  A fresh subscriber gets the retained payload."""
         publisher = _new_client(mosquitto_broker, "test-retain-pub")
         publisher.connect()
         assert _drive_until(
@@ -293,8 +301,11 @@ class TestRetainedMessages:
             qos=0,
             retain=True,
         )
-        # Drive briefly to flush the wire write.
-        _drive_until(publisher, lambda: False, timeout_seconds=0.5)
+        # Drive until the QoS-0 PUBLISH has left the tx queue, then
+        # disconnect.  Write interest drops once handle() flushes the
+        # queued packet to the socket — far faster than a fixed
+        # wall-clock pad, and it actually confirms the write left.
+        assert _drive_until(publisher, lambda: not (publisher.io_interest(ticks_ms()) & IO_WRITE))
         publisher.disconnect()
 
         # Fresh subscriber.
@@ -314,6 +325,8 @@ class TestRetainedMessages:
         cleaner.connect()
         _drive_until(cleaner, lambda: cleaner.state == ProtocolState.CONNECTED)
         cleaner.publish("chumicro-mqtt-test/retain", b"", qos=0, retain=True)
-        _drive_until(cleaner, lambda: False, timeout_seconds=0.5)
+        # Flush the retained-clear PUBLISH the same way: wait for the tx
+        # queue to drain rather than padding a fixed half second.
+        assert _drive_until(cleaner, lambda: not (cleaner.io_interest(ticks_ms()) & IO_WRITE))
         cleaner.disconnect()
         subscriber.disconnect()

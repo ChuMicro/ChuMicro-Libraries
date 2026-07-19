@@ -1,12 +1,12 @@
-"""Basic handler patterns — the most common way to use Runner.
+"""Basic handler patterns: the most common way to use Runner.
 
-- **Every-tick handler** — fires on every ``tick()`` call.
+- **Every-tick handler**: fires on every ``tick()`` call.
   Use for work that must run as often as possible (polling buttons,
   reading input buffers).
-- **Periodic handler** — fires on a fixed time schedule.
+- **Periodic handler**: fires on a fixed time schedule.
   Use for regular intervals (blinking LEDs, logging, heartbeats).
 
-No task objects needed — just pass a callable and optionally a period.
+No task objects needed: pass a callable and optionally a period.
 
 Example output::
 
@@ -31,7 +31,7 @@ tick_count = 0
 
 
 def poll_inputs(now_ms: int) -> None:
-    """Poll hardware inputs — runs every tick.
+    """Poll hardware inputs every tick.
 
     On a real board this might scan a button matrix or read
     a UART buffer.  Here it just counts ticks.
@@ -75,9 +75,7 @@ runner.add_periodic(heartbeat, period_ms=2000)
 print("Running...\n")
 
 while True:
-    # tick() captures time once, checks all tasks, and fires
-    # any that are due.  Every-tick handlers run on every call;
-    # periodic handlers run only when their interval has elapsed.
+    # tick() captures the current time once and fires every due handler.
     runner.tick()
 
     # In a real project, the rest of your main loop goes here.

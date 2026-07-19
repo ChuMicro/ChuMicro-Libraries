@@ -1,22 +1,6 @@
 """HTTP/1.1 wire format for chumicro-http-server.
 
-Server-side counterpart to :mod:`chumicro_requests._wire`: a streaming
-:class:`RequestParser` reads the request line + headers (+ optional
-body) one chunk at a time, fed bytes by the per-connection state
-machine in ``server.py``.
-
-The shared HTTP/1.1 primitives needed by both client and server —
-:class:`CaseInsensitiveDict` (case-insensitive header dict, RFC 7230
-§3.2) and :func:`parse_charset` (Content-Type charset, RFC 7231
-§3.1.1.5) — are inlined here rather than imported from
-:mod:`chumicro_requests`: pulling the full client (~1.8K lines)
-onto server-only boards for ~125 lines of shared code roughly
-doubles the flash footprint of a server-only deploy.  The RFCs
-are stable, so the duplication has near-zero drift cost.
-
-Scope: request line + headers + ``Content-Length`` body buffering.
-Chunked request bodies and streaming-via-chunk-callback are out of
-scope.
+The main entry point is :class:`RequestParser`.
 """
 
 try:
@@ -26,109 +10,74 @@ except ImportError:
         return value
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-#: Default per-connection recv cap.
 DEFAULT_RECV_BUDGET_PER_TICK = const(1024)
 
-#: Default per-connection send cap.
 DEFAULT_SEND_BUDGET_PER_TICK = const(4096)
 
-#: Default per-request body cap.  Bodies bigger than this are rejected
-#: at headers-complete time with a 413 response — no body allocation.
+#: Bodies larger than this cap are rejected with 413.
 DEFAULT_MAX_REQUEST_BODY_BYTES = const(16384)
 
-#: Default steady-state body buffer size for :class:`RequestParser`.
-#: The Connection layer allocates one of these per accepted connection
-#: and passes it to the parser, so requests whose Content-Length fits
-#: parse with zero body allocation; larger requests get a one-shot
-#: ``bytearray(content_length)`` sized-to-fit, freed after the response
-#: drains.  Matches :data:`chumicro_requests._wire.DEFAULT_BODY_BUFFER_SIZE`.
-DEFAULT_BODY_BUFFER_SIZE = const(1024)
+#: A longer request line without a CRLF is rejected with 414.
+DEFAULT_MAX_REQUEST_LINE_BYTES = const(1024)
 
-#: Default per-connection deadline.
+#: Header sections larger than this are rejected with 431.
+DEFAULT_MAX_HEADERS_BYTES = const(4096)
+
 DEFAULT_REQUEST_TIMEOUT_MS = const(10000)
 
-#: Default in-flight connection cap.
 DEFAULT_MAX_CONNECTIONS = const(4)
 
-#: HTTP/1.1 line terminator.
+DEFAULT_STREAM_BUFFER_SIZE = const(1024)
+
+#: End-of-body sentinel (-1), distinct from a 0 return (none ready this tick).
+SOURCE_EOF = const(-1)
+
 CRLF = b"\r\n"
 
 
-# ---------------------------------------------------------------------------
-# Server-facing exceptions
-# ---------------------------------------------------------------------------
-
-
 class ServerError(Exception):
-    """Base class for chumicro-http-server failures.
-
-    Independent of :mod:`chumicro_requests`'s ``HttpError`` so the
-    server can ship without the client library.  Callers that run
-    both halves on one board and want to catch either side can use
-    ``except (HttpError, ServerError):``.
-    """
+    """Base class for chumicro-http-server failures."""
 
 
 class ServerProtocolError(ServerError):
-    """Inbound bytes don't conform to HTTP/1.1.
-
-    Connection should be torn down + a 400 returned (best-effort).
-    """
+    """Inbound bytes don't conform to HTTP/1.1 (the connection returns 400)."""
 
 
-class ServerOversizedError(ServerError):
-    """Request ``Content-Length`` exceeds ``max_body_bytes``.
+class ServerLimitError(ServerError):
+    """A sender-controlled allocation hit a documented cap."""
 
-    Surfaced by the parser at headers-complete time, before any body
-    bytes are allocated.  The connection layer responds with 413
-    Payload Too Large and closes — the body is never read.  Sibling
-    of :class:`ServerProtocolError` so ``except ServerError`` catches
-    both, but distinct so the connection can choose 413 over 400.
+    #: HTTP status the connection layer emits; subclasses override.
+    status_code = 400
 
-    :attr:`reported_length` is the value the client declared.
-    """
+
+class ServerOversizedError(ServerLimitError):
+    """Request ``Content-Length`` exceeds ``max_body_bytes`` (413)."""
+
+    status_code = 413
 
     def __init__(self, message, *, reported_length):
         super().__init__(message)
         self.reported_length = reported_length
 
 
-# ---------------------------------------------------------------------------
-# Case-insensitive header dict
-# ---------------------------------------------------------------------------
+class ServerRequestLineTooLargeError(ServerLimitError):
+    """Request line grew past ``max_request_line_bytes`` without a CRLF (414)."""
+
+    status_code = 414
+
+
+class ServerHeadersTooLargeError(ServerLimitError):
+    """Header section grew past ``max_headers_bytes`` (431)."""
+
+    status_code = 431
 
 
 class CaseInsensitiveDict:
-    """Header dict whose lookups fold to lowercase.
-
-    HTTP/1.1 §3.2 requires header names to be case-insensitive on
-    receipt (servers and clients alike).  We store the original-cased
-    name (so callers see ``Content-Type`` and not ``content-type``)
-    keyed off the lowercased form.
-
-    Multi-value headers (``Set-Cookie``, ``Via``) join with ``, ``
-    per RFC 7230 §3.2.2 when the same header arrives twice.
-
-    Implements ``__getitem__`` / ``__setitem__`` / ``__contains__`` /
-    ``__len__`` / ``__iter__`` / ``get`` / ``items`` — enough for the
-    request/response API surface.  Not a full :class:`MutableMapping`
-    to keep the embedded footprint small.
-
-    Inlined from chumicro-requests to keep the server self-contained;
-    behavior matches :class:`chumicro_requests.CaseInsensitiveDict`
-    byte-for-byte.
-    """
+    """Header dict whose lookups fold to lowercase."""
 
     def __init__(self):
-        # Lowercase key -> (original_name, value).  Paired with
-        # ``_order`` (list of lowercase keys) so iteration preserves
-        # insertion order on every runtime — MicroPython and
-        # CircuitPython dicts do not guarantee insertion order, unlike
-        # CPython 3.7+.
+        # noqa: CHU027 - same dict body as chumicro-requests _wire.py; per-consumer duplication kept intentionally
+        # ``_order`` tracks insertion order; MicroPython/CircuitPython dicts don't.
         self._entries = {}
         self._order = []
 
@@ -182,12 +131,8 @@ class CaseInsensitiveDict:
         for lower in self._order:
             yield self._entries[lower]
 
-    def add(self, name, value):
-        """Append *value* to the existing header, joining with ``, ``.
-
-        New keys behave like :meth:`__setitem__`.  Used by the parser
-        for repeated header lines (``Set-Cookie``, ``Via``).
-        """
+    def add(self, name, value):  # noqa: CHU027 - same docstring as chumicro-requests _wire.add; per-consumer duplication kept intentionally
+        """Append *value* to an existing header, joining with ``, ``."""
         lower = name.lower()
         existing = self._entries.get(lower)
         if existing is None:
@@ -199,35 +144,14 @@ class CaseInsensitiveDict:
         self._entries[lower] = (original_name, joined)
 
 
-# ---------------------------------------------------------------------------
-# Content-Type charset parsing
-# ---------------------------------------------------------------------------
-
-
-def parse_charset(content_type: str | None) -> str:
+def parse_charset(content_type: str | None) -> str:  # noqa: CHU027 - same docstring as chumicro-requests _wire.parse_charset; per-consumer duplication kept intentionally
     """Extract the ``charset=...`` parameter from a Content-Type header.
-
-    Per RFC 7231 §3.1.1.5 the Content-Type value may carry a
-    ``charset`` parameter — for example ``text/html; charset=utf-8``
-    or ``application/json; charset="ISO-8859-1"``.  We tokenize on
-    semicolons, look for a ``charset=`` token (case-insensitive),
-    strip optional surrounding quotes per RFC 7231 §3.1.1.1, and
-    fall back to ``"utf-8"`` when no charset is present or the
-    header itself is missing.
-
-    Defaulting to UTF-8 matches RFC 8259 §8.1 for ``application/json``
-    and aligns with current web practice for ``text/*`` even though
-    historical RFC 2616 defaulted text to ISO-8859-1.
-
-    Inlined from chumicro-requests to keep the server self-contained;
-    behavior matches :func:`chumicro_requests.parse_charset`
-    byte-for-byte.
 
     Args:
         content_type: Raw ``Content-Type`` header value, or ``None``.
 
     Returns:
-        The detected charset name, or ``"utf-8"`` as the safe default.
+        The detected charset name, or ``"utf-8"`` as the default.
     """
     if not content_type:
         return "utf-8"
@@ -243,19 +167,8 @@ def parse_charset(content_type: str | None) -> str:
     return "utf-8"
 
 
-# ---------------------------------------------------------------------------
-# Request parser
-# ---------------------------------------------------------------------------
-
-
 class RequestParseState:
-    """Streaming request parser states.
-
-    Forward-only::
-
-      REQUEST_LINE -> HEADERS -> BODY -> DONE
-                                   \\-> ERROR (any state)
-    """
+    """Streaming request parser states."""
 
     REQUEST_LINE = "request_line"
     HEADERS = "headers"
@@ -264,94 +177,41 @@ class RequestParseState:
     ERROR = "error"
 
 
+_PARSER_TERMINAL_STATES = (RequestParseState.DONE, RequestParseState.ERROR)
+
+
 class RequestParser:
-    """Streaming HTTP/1.1 request parser.
-
-    Fed raw bytes via :meth:`feed`; the state advances as soon as
-    enough bytes arrive.  Callers check :attr:`state` to know whether
-    to keep feeding (anything other than ``DONE``/``ERROR``) or stop.
-
-    Body framing — two active tiers + a steady-state tier reserved
-    for keep-alive (parallel to :class:`chumicro_requests._wire.
-    HttpResponseParser`'s shape):
-
-    * **Sized rebind.**  ``Content-Length ≤ max_body_bytes`` but >
-      ``body_buffer`` capacity (default capacity is 0, since
-      ``body_buffer`` is unused by ``_Connection`` today).  The parser
-      allocates one ``bytearray(content_length)`` sized exactly to
-      fit at headers-complete time and slice-assigns body bytes
-      directly into it.  Single allocation per request, freed when
-      the parser is dereferenced.
-    * **413 reject.**  ``Content-Length > max_body_bytes``.  No body
-      allocation.  Parser raises :class:`ServerOversizedError` and
-      the connection layer responds 413 Payload Too Large.
-    * **Steady (reserved).**  ``Content-Length ≤ body_buffer
-      capacity``.  Body writes land in the caller-supplied buffer
-      with zero allocation.  ``_Connection`` does not supply a
-      ``body_buffer`` today because every response emits
-      ``Connection: close`` — the buffer would have a use-once
-      lifetime, which the on-device fragmentation tests in
-      ``chumicro_requests`` measured as a regression.  When
-      keep-alive lands and connections live across requests, the
-      buffer becomes a steady-state tier worth pre-allocating.
-
-    Chunked request bodies are not supported, so Content-Length is
-    always known when entering ``BODY`` state — sized-rebind happens
-    at :meth:`_enter_body_state`, not lazily during body absorption.
-
-    No Content-Length and no chunked → assume zero-length body,
-    transition straight to ``DONE``.
-    """
+    """Streaming HTTP/1.1 request parser."""
 
     def __init__(
         self,
         *,
         max_body_bytes: int = DEFAULT_MAX_REQUEST_BODY_BYTES,
+        max_request_line_bytes: int = DEFAULT_MAX_REQUEST_LINE_BYTES,
+        max_headers_bytes: int = DEFAULT_MAX_HEADERS_BYTES,
         body_buffer: bytearray | None = None,
         body_buffer_view: memoryview | None = None,
     ) -> None:
         """Construct a one-shot parser.
 
         Args:
-            max_body_bytes: Hard cap on body size — exceeded ⇒ 413.
-            body_buffer: Optional caller-owned ``bytearray`` reused as
-                a steady-state body buffer across requests.  Requests
-                whose Content-Length fits land in it with zero
-                allocation; bigger-but-allowed requests rebind ``_body``
-                to a one-shot sized-to-fit buffer for that request only
-                and leave the caller's reference unchanged.  ``None``
-                (the default, and what ``_Connection`` passes today)
-                means the parser starts empty and the sized-rebind
-                path allocates fresh for every body.  Pre-allocating
-                a buffer that has a use-once lifetime fragments worse
-                than allocating sized-to-fit on demand (measured by
-                the on-device fragmentation tests in
-                ``chumicro_requests``); only supply ``body_buffer``
-                when its lifetime truly spans multiple requests.
-            body_buffer_view: Pre-cached ``memoryview(body_buffer)``
-                supplied by the caller to avoid the parser constructing
-                one.  Optional even when ``body_buffer`` is provided
-                (a view will be made if missing).
+            max_body_bytes: Body-size cap; a bigger body is rejected with 413.
+            max_request_line_bytes: Request-line cap; a longer line without a CRLF is rejected with 414.
+            max_headers_bytes: Header-section cap; crossing it is rejected with 431.
+            body_buffer: Optional caller-owned bytearray reused per body; ``None`` allocates per body.
+            body_buffer_view: Pre-cached memoryview of *body_buffer*; made for you when omitted.
         """
         self._max_body_bytes = max_body_bytes
+        self._max_request_line_bytes = max_request_line_bytes
+        self._max_headers_bytes = max_headers_bytes
+        self._headers_bytes = 0
         self._buffer = bytearray()
-        # Read cursor into ``_buffer``.  Each ``_consume(n)`` advances
-        # the cursor and only realloates the bytearray when at least
-        # half of it has been consumed — mirrors the read-cursor pattern
-        # in :class:`chumicro_requests._wire.HttpResponseParser`.
         self._read_offset = 0
         self.state = RequestParseState.REQUEST_LINE
         self.method = ""
         self.target = ""
         self.http_version = ""
         self.headers = CaseInsensitiveDict()
-        # Body buffer: caller-supplied (``_Connection`` passes the
-        # long-lived per-connection buffer) or self-allocated (standalone
-        # use starts empty + rebinds on first request).  ``_body`` is
-        # the active buffer, ``_body_view`` the cached memoryview,
-        # ``_body_capacity`` the size of the active buffer.  Oversized
-        # but-allowed requests (capacity < Content-Length ≤ max_body_bytes)
-        # rebind ``_body`` in :meth:`_enter_body_state`.
         if body_buffer is not None:
             if body_buffer_view is None:
                 body_buffer_view = memoryview(body_buffer)
@@ -366,76 +226,44 @@ class RequestParser:
         self._body_remaining = 0
         self.error = None
 
-    # ------------------------------------------------------------------
-    # Buffer helpers (read-cursor pattern — see ResponseParser)
-    # ------------------------------------------------------------------
-
     def _live_len(self):
-        """Number of unconsumed bytes in ``_buffer``."""
         return len(self._buffer) - self._read_offset
 
     def _live_find(self, target):
-        """``find`` *target* in the unconsumed region; relative position or -1."""
         position = self._buffer.find(target, self._read_offset)
         if position == -1:
             return -1
         return position - self._read_offset
 
     def _live_slice(self, start, end=None):
-        """Slice of unconsumed data.  Indices are relative to the cursor."""
         absolute_start = self._read_offset + start
         if end is None:
             return self._buffer[absolute_start:]
         return self._buffer[absolute_start:absolute_start + end]
 
     def _consume(self, count):
-        """Advance the cursor; compact when past the halfway mark.
-
-        Slice-assign-empty (``self._buffer[:offset] = b""``) does an
-        in-place memmove on CPython / MicroPython / CircuitPython — no
-        allocation.  See :meth:`chumicro_requests._wire.ResponseParser._consume`
-        for the fragmentation rationale and the original allocating shape
-        this replaces.
-        """
         self._read_offset += count
         if self._read_offset > 0 and self._read_offset * 2 >= len(self._buffer):
+            # Slice-assign-empty is an in-place memmove (no allocation).
             self._buffer[:self._read_offset] = b""
             self._read_offset = 0
 
     def _reset_buffer(self):
-        """Drop every buffered byte and reset the cursor."""
         self._buffer = bytearray()
         self._read_offset = 0
 
-    # ------------------------------------------------------------------
-    # Public observation
-    # ------------------------------------------------------------------
-    #
-    # ``state`` / ``method`` / ``target`` / ``http_version`` / ``headers`` /
-    # ``error`` are direct public attributes set during parsing.  The body
-    # snapshot needs a computed view, so it stays a method-shape accessor.
-
     @property
     def body(self):
-        """Body bytes received so far (final once :attr:`state` is ``DONE``).
-
-        Reads through the cached ``_body_view`` (zero-copy memoryview
-        slice) and snapshots one ``bytes`` copy for the caller —
-        handlers may ``.decode()`` the result, which memoryview lacks.
-        """
+        """Body bytes received so far (final once :attr:`state` is ``DONE``)."""
         return bytes(self._body_view[:self._body_write_offset])
-
-    # ------------------------------------------------------------------
-    # Driving the parser
-    # ------------------------------------------------------------------
 
     def feed(self, chunk):
         """Append *chunk* to the parser's buffer and advance the state.
 
-        Raises :class:`ServerProtocolError` when the bytes can't be
-        reconciled with HTTP/1.1.
+        Raises:
+            ServerProtocolError: The bytes don't conform to HTTP/1.1.
         """
-        if self.state in (RequestParseState.DONE, RequestParseState.ERROR):
+        if self.state in _PARSER_TERMINAL_STATES:
             return
         if chunk:
             if self.state == RequestParseState.BODY:
@@ -445,8 +273,8 @@ class RequestParser:
         self._advance()
 
     def feed_eof(self):
-        """Signal that the peer closed.  Mid-headers is a protocol error."""
-        if self.state in (RequestParseState.DONE, RequestParseState.ERROR):
+        """Signal that the peer closed."""
+        if self.state in _PARSER_TERMINAL_STATES:
             return
         if self.state == RequestParseState.BODY and self._body_remaining > 0:
             self._fail(ServerProtocolError(
@@ -458,12 +286,7 @@ class RequestParser:
             f"client closed before request completed (state={self.state})",
         ))
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
     def _advance(self):
-        """Consume buffered bytes until no more progress is possible."""
         while True:
             if self.state == RequestParseState.REQUEST_LINE:
                 if not self._try_parse_request_line():
@@ -473,24 +296,30 @@ class RequestParser:
                 if not self._try_parse_headers():
                     return
                 continue
-            return  # BODY (handled in feed) / DONE / ERROR
+            return  # BODY handled in feed(); DONE / ERROR are terminal
 
     def _try_parse_request_line(self):
-        """Consume the request line; return True if state advanced.
-
-        Format per RFC 7230 §3.1.1::
-
-            method SP request-target SP HTTP-version CRLF
-        """
         crlf_index = self._live_find(CRLF)
         if crlf_index == -1:
+            # No CRLF yet: bound the buffer so a no-CRLF stream can't grow unbounded.
+            if self._live_len() > self._max_request_line_bytes:
+                self._fail(ServerRequestLineTooLargeError(
+                    f"request line exceeds cap {self._max_request_line_bytes}",
+                ))
+                return True
             return False
+        # Also reject when the found line exceeds the cap, or 414 goes soft.
+        if crlf_index > self._max_request_line_bytes:
+            self._fail(ServerRequestLineTooLargeError(
+                f"request line exceeds cap {self._max_request_line_bytes}",
+            ))
+            return True
         line = self._live_slice(0, crlf_index)
         self._consume(crlf_index + 2)
         try:
             text = str(line, "ascii")
-        # HTTP/1.1 §3.1 forbids non-ASCII; defensive only.
-        except UnicodeDecodeError as decode_error:  # pragma: no cover
+        # Catch ValueError, not UnicodeDecodeError: MicroPython/CircuitPython lack that builtin.
+        except ValueError as decode_error:  # pragma: no cover
             self._fail(ServerProtocolError(
                 f"non-ASCII request line: {bytes(line)!r}",
             ))
@@ -523,23 +352,29 @@ class RequestParser:
         self.state = RequestParseState.HEADERS
         return True
 
-    def _try_parse_headers(self):
-        """Consume one header line; return True if state advanced or
-        another header was parsed."""
+    def _try_parse_headers(self):  # noqa: CHU027 - same parse loop as chumicro-requests _wire._try_parse_headers; per-consumer duplication kept intentionally
+        # Cap consumed plus unconsumed bytes, bounding a no-CRLF stream and many small headers.
+        if self._headers_bytes + self._live_len() > self._max_headers_bytes:
+            self._fail(ServerHeadersTooLargeError(
+                f"header section exceeds cap {self._max_headers_bytes}",
+            ))
+            return True
         crlf_index = self._live_find(CRLF)
         if crlf_index == -1:
             return False
         if crlf_index == 0:
-            # Empty line — end of headers.
+            # Blank line ends the header section.
+            self._headers_bytes += 2
             self._consume(2)
             self._enter_body_state()
             return True
         line = self._live_slice(0, crlf_index)
+        self._headers_bytes += crlf_index + 2
         self._consume(crlf_index + 2)
         try:
             text = str(line, "ascii")
-        # HTTP/1.1 §3.2 forbids non-ASCII; defensive only.
-        except UnicodeDecodeError as decode_error:  # pragma: no cover
+        # Catch ValueError, not UnicodeDecodeError (same cross-runtime reason as above).
+        except ValueError as decode_error:  # pragma: no cover
             self._fail(ServerProtocolError(
                 f"non-ASCII header line: {bytes(line)!r}",
             ))
@@ -556,18 +391,14 @@ class RequestParser:
         return True
 
     def _enter_body_state(self):
-        """Headers-complete: figure out body framing + size the body buffer."""
         if self.headers.get("Transfer-Encoding") is not None:
-            # Chunked request bodies are unsupported; framing one as
-            # zero-length (the no-Content-Length path below) lets a
-            # smuggled body ride into the next request. Reject (400).
+            # Reject chunked: framing it as zero-length would allow request smuggling.
             self._fail(ServerProtocolError(
                 "Transfer-Encoding request bodies are not supported",
             ))
             return
         content_length_str = self.headers.get("Content-Length")
         if content_length_str is None:
-            # No Content-Length, no chunked — assume zero body.
             self.state = RequestParseState.DONE
             return
         try:
@@ -583,9 +414,7 @@ class RequestParser:
             ))
             return
         if content_length > self._max_body_bytes:
-            # Tier 3: 413 before any body allocation.  The connection
-            # layer catches ``ServerOversizedError`` and responds 413
-            # rather than treating it as a generic protocol-error 400.
+            # Raise before allocating any body, so the layer returns 413 not a generic 400.
             self._fail(ServerOversizedError(
                 f"Content-Length {content_length} exceeds cap "
                 f"{self._max_body_bytes}",
@@ -596,9 +425,7 @@ class RequestParser:
         if content_length == 0:
             self.state = RequestParseState.DONE
             return
-        # Tier 2 sized-rebind when the steady buffer (caller-supplied
-        # or empty) can't hold this request.  Tier 1 — when capacity
-        # already covers ``content_length`` — touches no heap.
+        # Grow the body buffer only when the steady buffer can't hold this request.
         if content_length > self._body_capacity:
             self._body = bytearray(content_length)
             self._body_view = memoryview(self._body)
@@ -611,15 +438,9 @@ class RequestParser:
             self._absorb_body_bytes(tail_view)
 
     def _absorb_body_bytes(self, chunk):
-        """Write body bytes into the pre-sized body buffer.
-
-        :meth:`_enter_body_state` already sized ``_body`` to the
-        declared Content-Length (the steady-state buffer when it fits,
-        a one-shot sized-rebind otherwise), so every write here fits
-        and slice-assign is unconditional.  No grow fallback.
-        """
+        # _body was sized to Content-Length, so every write fits with no grow path.
         if self._body_remaining == 0:
-            return  # Already complete; ignore extra (client sent too many).
+            return  # Body already complete; drop extra bytes the client sent.
         take = min(self._body_remaining, len(chunk))
         write_offset = self._body_write_offset
         end_offset = write_offset + take
@@ -631,24 +452,12 @@ class RequestParser:
             self.state = RequestParseState.DONE
 
     def _fail(self, error):
-        """Latch *error* and transition to ERROR."""
         self.error = error
         self.state = RequestParseState.ERROR
 
 
-# ---------------------------------------------------------------------------
-# Request-target helpers
-# ---------------------------------------------------------------------------
-
-
 def split_target(target: str) -> tuple[str, str]:
-    """Split a request-target into ``(path, raw_query)``.
-
-    *path* always starts with ``/`` (matches the request-target shape
-    HTTP clients use).  *raw_query* is everything after the first ``?``
-    or ``""`` when none is present — caller parses further with
-    :func:`parse_query` if needed.
-    """
+    """Split a request-target into ``(path, raw_query)``."""
     question_index = target.find("?")
     if question_index == -1:
         return target, ""
@@ -656,14 +465,7 @@ def split_target(target: str) -> tuple[str, str]:
 
 
 def parse_query(raw_query: str) -> "CaseInsensitiveDict":
-    """Parse a ``foo=bar&baz=qux`` query string into a header-shaped dict.
-
-    Repeated keys join with ``,`` per the same RFC 7230 §3.2.2 rule
-    headers use — caller can `.split(",")` if they need both values.
-    Percent-decoding is **not** done in v1; URL-encoded values come
-    through as-is (most embedded REST APIs use bare alphanumeric
-    keys + values).  Documented as a limitation.
-    """
+    """Parse a ``foo=bar&baz=qux`` query string into a header-shaped dict."""
     result = CaseInsensitiveDict()
     if not raw_query:
         return result
@@ -682,22 +484,26 @@ def parse_query(raw_query: str) -> "CaseInsensitiveDict":
     return result
 
 
-# Re-export the shared primitive so server-side callers don't need to
-# also import from chumicro_requests.
 __all__ = [
     "CRLF",
-    "DEFAULT_BODY_BUFFER_SIZE",
     "DEFAULT_MAX_CONNECTIONS",
+    "DEFAULT_MAX_HEADERS_BYTES",
     "DEFAULT_MAX_REQUEST_BODY_BYTES",
+    "DEFAULT_MAX_REQUEST_LINE_BYTES",
     "DEFAULT_RECV_BUDGET_PER_TICK",
     "DEFAULT_REQUEST_TIMEOUT_MS",
     "DEFAULT_SEND_BUDGET_PER_TICK",
+    "DEFAULT_STREAM_BUFFER_SIZE",
+    "SOURCE_EOF",
     "CaseInsensitiveDict",
     "RequestParseState",
     "RequestParser",
     "ServerError",
+    "ServerHeadersTooLargeError",
+    "ServerLimitError",
     "ServerOversizedError",
     "ServerProtocolError",
+    "ServerRequestLineTooLargeError",
     "parse_charset",
     "parse_query",
     "split_target",

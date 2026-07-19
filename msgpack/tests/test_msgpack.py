@@ -4,14 +4,13 @@ from io import BytesIO
 
 from chumicro_msgpack import pack, packb, unpack, unpackb
 
-# Tests that pin the *pure-subset* contract — exact wire bytes,
-# overflow rejection, out-of-subset decode rejection — assert against
-# ``_pure`` directly.  On a CircuitPython board the public ``packb`` /
+# Tests that pin the pure-subset contract (exact wire bytes, overflow
+# rejection, out-of-subset decode rejection) assert against ``_pure``
+# directly.  On a CircuitPython board the public ``packb`` /
 # ``unpackb`` resolve to the firmware's native ``msgpack`` C module,
-# which is full msgpack (not subset-constrained) by design (see
-# ``chumicro_msgpack.__init__``); ``_pure`` is the implementation that
-# owns the subset contract and behaves identically on every runtime,
-# so these checks stay meaningful on real hardware too.
+# which implements the full spec (not subset-constrained) by design.
+# ``_pure`` owns the subset contract and behaves identically on every
+# runtime, so these checks stay meaningful on real hardware too.
 from chumicro_msgpack._pure import packb as _pure_packb
 from chumicro_msgpack._pure import unpackb as _pure_unpackb
 from chumicro_test_harness import raises
@@ -452,7 +451,7 @@ def test_unknown_decode_byte_raises() -> None:
     """Decoding a tag byte the decoder doesn't recognize should raise ValueError.
 
     0xc1 is reserved-and-never-used in the msgpack spec, so it has no
-    branch in the decoder; it falls through to the generic
+    branch in the decoder. It falls through to the generic
     "unsupported msgpack type byte" raise.
     """
     with raises(ValueError):
@@ -469,14 +468,14 @@ def test_float64_decode_raises() -> None:
     """Decoding float64 (0xcb) should raise ValueError naming float64."""
     # 0xcb + 8 bytes of IEEE 754 binary64 for 1.0
     encoded = b"\xcb\x3f\xf0\x00\x00\x00\x00\x00\x00"
-    with raises(ValueError):
+    with raises(ValueError, match="float64"):
         _pure_unpackb(encoded)
 
 
 def test_uint64_decode_raises() -> None:
     """Decoding uint64 (0xcf) should raise ValueError naming uint64."""
     encoded = b"\xcf\x00\x00\x00\x01\x00\x00\x00\x00"  # 2**32
-    with raises(ValueError):
+    with raises(ValueError, match="uint64"):
         _pure_unpackb(encoded)
 
 
@@ -525,8 +524,7 @@ def test_map32_decode_raises() -> None:
 def test_truncated_bin8_raises() -> None:
     """A bin8 claiming more bytes than remain raises, not a short read.
 
-    The audit case: 0xc4 + length 0xc8 (200) but only 2 payload bytes.
-    Pre-hardening this returned the 2 available bytes.
+    Wire bytes: 0xc4 (bin8 tag) + length 0xc8 (200) + 2 payload bytes.
     """
     with raises(ValueError):
         _pure_unpackb(b"\xc4\xc8\x01\x02")
@@ -550,11 +548,42 @@ def test_truncated_bin16_raises() -> None:
         _pure_unpackb(b"\xc5\x00\x10ab")  # claims 16 bytes, supplies 2
 
 
+def test_truncated_uint16_header_raises() -> None:
+    """A uint16 tag with one of its two value bytes missing raises ValueError.
+
+    The multi-byte header itself is truncated (not a payload): on CPython
+    struct.unpack_from raises struct.error, which the contract translates
+    to ValueError so a caller's ``except ValueError`` catches it.
+    """
+    with raises(ValueError):
+        _pure_unpackb(b"\xcd\x00")  # uint16 tag, 1 of 2 bytes
+
+
+def test_truncated_bin8_length_header_raises() -> None:
+    """A bin8 tag with its length byte missing raises ValueError.
+
+    data[offset + 1] reads past the buffer (IndexError on every runtime).
+    """
+    with raises(ValueError):
+        _pure_unpackb(b"\xc4")  # bin8 tag, no length byte
+
+
+def test_truncated_str16_header_raises() -> None:
+    """A str16 tag with a short length header raises ValueError."""
+    with raises(ValueError):
+        _pure_unpackb(b"\xda\x00")  # str16 tag, 1 of 2 length bytes
+
+
+def test_truncated_uint32_header_raises() -> None:
+    """A uint32 tag with a short value header raises ValueError."""
+    with raises(ValueError):
+        _pure_unpackb(b"\xce\x00\x00")  # uint32 tag, 2 of 4 bytes
+
+
 def test_trailing_bytes_raises() -> None:
     """Bytes left after one complete object raise at the top level.
 
-    The audit case: 0x01 decodes as int 1, leaving 3 trailing bytes
-    that were silently dropped pre-hardening.
+    Wire bytes: 0x01 decodes as int 1, leaving 3 trailing bytes.
     """
     with raises(ValueError):
         _pure_unpackb(b"\x01\xff\xff\xff")
@@ -583,19 +612,43 @@ def test_nesting_too_deep_raises() -> None:
 
     The bound (8) is well below where a Pi Pico W under MicroPython
     exhausts pystack (17 nested), so the guard fires first on every
-    supported board — bench-confirmed on the 4-board matrix.
+    supported board.
     """
-    # 9 nested single-element arrays — one past _MAX_DEPTH (8).
+    # 9 nested single-element arrays, one past _MAX_DEPTH (8).
     with raises(ValueError):
         _pure_unpackb(b"\x91" * 9 + b"\x00")
 
 
 def test_moderate_nesting_still_roundtrips() -> None:
-    """The depth bound is above realistic nesting — 4 deep roundtrips fine."""
+    """The depth bound is above realistic nesting. 4 levels deep roundtrips fine."""
     value = 0
     for _ in range(4):
         value = [value]
     assert _pure_unpackb(_pure_packb(value)) == [[[[0]]]]
+
+
+def test_encode_refuses_nesting_the_decoder_would_reject() -> None:
+    """packb enforces the same depth bound as unpackb, so it never emits
+    bytes the same library cannot read back (which a store would persist
+    and then lose silently on the next load)."""
+    deep = 0
+    for _ in range(9):  # one past _MAX_DEPTH (8)
+        deep = [deep]
+    with raises(ValueError):
+        _pure_packb(deep)
+    # The deepest value packb DOES accept round-trips cleanly.
+    ok = 0
+    for _ in range(8):
+        ok = [ok]
+    assert _pure_unpackb(_pure_packb(ok)) == ok
+
+
+def test_container_map_key_raises_value_error_not_type_error() -> None:
+    """A structurally-valid map with a container key surfaces as ValueError
+    (the untrusted-input contract), not a raw TypeError."""
+    # {[]: 0} — fixmap len 1, fixarray len 0 (key), 0 (value).
+    with raises(ValueError):
+        _pure_unpackb(b"\x81\x90\x00")
 
 
 def test_exact_buffer_no_trailing_roundtrips() -> None:

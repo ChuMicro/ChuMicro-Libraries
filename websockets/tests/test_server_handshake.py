@@ -1,7 +1,7 @@
 """WebSocket server tests (chumicro_websockets.server): constructor,
-accept, handshake, handshake rejection. Sibling slices: the
-other test_server_*.py files; wire-level in test_wire_*.py."""
+accept, handshake, handshake rejection."""
 
+from chumicro_runner import IO_READ, IO_WRITE
 from chumicro_timing.testing import FakeTicks
 from chumicro_websockets import (
     WebSocketServer,
@@ -13,6 +13,7 @@ from chumicro_websockets._wire import (
     HandshakeResponseParser,
     encode_client_handshake,
 )
+from chumicro_websockets.server import ServerHandshakePhase
 from chumicro_websockets.testing import (
     FakeConnection,
     FakeListener,
@@ -81,7 +82,7 @@ class TestServerConstructor:
 
     def test_check_returns_true_when_idle(self):
         server, _listener, clock = _make_server()
-        # Conservative — always True until close().
+        # Conservative: always True until close().
         assert server.check(clock.ticks_ms()) is True
 
     def test_check_after_close_returns_false(self):
@@ -129,6 +130,24 @@ class TestAccept:
         server.handle(clock.ticks_ms())
         assert server.connection_count == 0
         listener.accept = original_accept
+
+    def test_listener_error_recorded_on_last_error(self):
+        server, listener, clock = _make_server()
+        assert server.last_error is None
+        boom = OSError(99, "listener dead")
+
+        def _raise(*_args, **_kwargs):
+            raise boom
+
+        listener.accept = _raise
+        server.handle(clock.ticks_ms())
+        assert server.last_error is boom
+
+    def test_eagain_does_not_set_last_error(self):
+        server, _listener, clock = _make_server()
+        # No queued accepts → FakeListener.accept raises OSError(EAGAIN).
+        server.handle(clock.ticks_ms())
+        assert server.last_error is None
 
 
 class TestHandshake:
@@ -211,7 +230,7 @@ class TestHandshakeRejection:
         server.handle(clock.ticks_ms())
         clock.advance(1500)
         server.handle(clock.ticks_ms())
-        # Connection finalized; removed from the active list.
+        # Connection finalized.  Removed from the active list.
         assert server.connection_count == 0
         assert peer.closed is True
 
@@ -239,3 +258,61 @@ class TestHandshakeRejection:
             server.handle(clock.ticks_ms())
         assert server.connection_count == 0
         assert peer.closed is True
+
+
+class TestServerRunnerReactorContract:
+    """Server ``Connection`` exposes ``io_*`` / ``next_deadline`` mirroring
+    the client but with the handshake legs reversed (server reads the
+    upgrade request, then writes the 101 response)."""
+
+    def _accepted_connection(self):
+        """Accept a peer and return the connection paused in READING_REQUEST."""
+        server, listener, clock = _make_server()
+        peer = FakeSocket()
+        listener.queue_accept(peer)
+        # One handle() tick accepts and creates the connection but does
+        # not yet feed any handshake bytes (peer.inbound is empty).
+        server.handle(clock.ticks_ms())
+        return server, peer, clock
+
+    def test_io_socket_returns_peer_socket_while_handshake_phase(self):
+        server, peer, _clock = self._accepted_connection()
+        connection = server.connections[0]
+        assert connection.io_socket is peer
+
+    def test_io_interest_read_during_reading_request(self):
+        server, _peer, _clock = self._accepted_connection()
+        connection = server.connections[0]
+        assert connection._handshake_phase == ServerHandshakePhase.READING_REQUEST
+        assert connection.io_interest(0) == IO_READ
+
+    def test_io_interest_write_during_sending_response(self):
+        server, peer, clock = self._accepted_connection()
+        # Feed the client's upgrade so the connection advances to
+        # SENDING_RESPONSE on the next tick.
+        peer.feed_inbound(_client_handshake_bytes())
+        server.handle(clock.ticks_ms())
+        connection = server.connections[0]
+        assert connection._handshake_phase == ServerHandshakePhase.SENDING_RESPONSE
+        assert connection.io_interest(0) == IO_WRITE
+
+    def test_io_interest_read_when_open(self):
+        server, listener, clock = _make_server()
+        _drive_server_handshake(server, listener, clock)
+        connection = server.connections[0]
+        assert connection.state == WebSocketState.OPEN
+        assert connection.io_interest(0) == IO_READ
+
+    def test_next_deadline_returns_handshake_deadline_during_handshake(self):
+        server, peer, clock = self._accepted_connection()
+        connection = server.connections[0]
+        deadline = connection.next_deadline(clock.ticks_ms())
+        assert deadline is not None
+        # The handshake deadline is set at accept time to *now + timeout*.
+        assert clock.ticks_diff(deadline, clock.ticks_ms()) > 0
+
+    def test_next_deadline_none_when_open_and_idle(self):
+        server, listener, clock = _make_server()
+        _drive_server_handshake(server, listener, clock)
+        connection = server.connections[0]
+        assert connection.next_deadline(clock.ticks_ms()) is None

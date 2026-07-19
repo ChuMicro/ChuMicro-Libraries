@@ -1,6 +1,8 @@
 """WebSocket server tests (chumicro_websockets.server): oversize,
 frame-level oversize, server close, connection edges."""
 
+import errno
+
 from chumicro_test_harness.assertions import raises
 from chumicro_timing.testing import FakeTicks
 from chumicro_websockets import (
@@ -98,7 +100,7 @@ class TestOversize:
         server.handle(clock.ticks_ms())
         server.handle(clock.ticks_ms())
         assert oversized
-        # Connection still OPEN; ready for next inbound message.
+        # Connection still OPEN, ready for next inbound message.
         assert observed[0].state == WebSocketState.OPEN
 
     def test_drop_with_event_next_message_arrives_intact(self):
@@ -179,18 +181,15 @@ class TestOversize:
         server.handle(clock.ticks_ms())
         server.handle(clock.ticks_ms())
         assert oversized == []  # DISCONNECT does NOT fire on_oversized
-        # Connection transitioned to CLOSING; peer echoes close to finalize.
+        # Connection transitioned to CLOSING.  Peer echoes close to finalize.
         assert observed[0].state in (WebSocketState.CLOSING, WebSocketState.CLOSED)
 
 
 class TestFrameLevelOversize:
-    """A single inbound client frame > the cap used to terminate the
-    connection with ``CLOSE_PROTOCOL_ERROR``; now it drains at the
-    frame layer (tier 3 in :class:`FrameParser`) and the server
-    applies its ``WhenOversized`` policy.  Matches the shared
-    cross-library oversize contract — ``DROP_WITH_EVENT`` drops the
-    payload and stays connected, like ``chumicro-mqtt`` and
-    ``chumicro-requests``.
+    """Single inbound client frames whose declared length exceeds
+    ``max_message_bytes`` drain at the frame layer (tier 3 in
+    :class:`FrameParser`).  The server applies its ``WhenOversized``
+    policy on the resulting empty frame.
     """
 
     def test_drop_with_event_reports_frame_length(self):
@@ -276,7 +275,7 @@ class TestConnectionEdges:
         listener.queue_accept(peer)
         peer.feed_inbound(_client_handshake_bytes())
         server.handle(clock.ticks_ms())  # accepts + reads request + transitions to SENDING_RESPONSE
-        peer.raise_on_send = OSError(11, "would block")
+        peer.raise_on_send = OSError(errno.EAGAIN, "would block")
         server.handle(clock.ticks_ms())  # send EAGAIN — state unchanged
         connection = server.connections[0]
         assert connection.state == WebSocketState.CONNECTING

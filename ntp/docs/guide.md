@@ -16,25 +16,25 @@ exchange terminates.  Single in-flight query at a time, mirroring
 `chumicro_requests.HttpClient.busy` semantics.
 
 The UDP socket is **injected** — `NTPClient(socket=...)` accepts any
-object that satisfies `chumicro_sockets.UDPSocket`.  Tests inject
+object satisfying the duck-typed UDP contract below (`sendto` /
+`recvfrom_into` / `close` / `setblocking`).  Tests inject
 `FakeUDPSocket` from `chumicro_sockets.testing`; apps inject a real
-socket either directly or via the
-`chumicro_ntp.sockets_factory.chumicro_sockets_factory()` helper.
+socket directly from `chumicro_sockets.udp_socket`.
 
 A few notes on dependencies:
 
 - `chumicro-sockets` is a hard dependency — `pip install chumicro-ntp` brings the whole stack.
-- The default-wiring helper lives in a separate submodule (`chumicro_ntp.sockets_factory`).  Apps that supply their own UDP socket don't import the helper, so `chumicro-sockets` doesn't get deployed to the device for those apps.
-- No `chumicro-events` or `chumicro-logging` deps.  The library exposes no callbacks — the result handle returned by `query()` is the observation surface.
+- `NTPClient.from_config` builds the default UDP wiring through the shared `chumicro_sockets.sockets_factory` module, imported lazily.  Apps that supply their own UDP socket never trigger that import, so `chumicro-sockets` doesn't get deployed to the device for those apps.
+- No `chumicro-logging` dep.  The library exposes no callbacks — the result handle returned by `query()` is the observation surface.
 
 ## Getting started
 
 ```python
 from chumicro_ntp import NTPClient
-from chumicro_ntp.sockets_factory import chumicro_sockets_factory
+from chumicro_sockets import udp_socket
 from chumicro_timing import ticks_ms
 
-sock = chumicro_sockets_factory(radio=wifi.adapter.radio)
+sock = udp_socket(radio=wifi.adapter.radio)
 sock.setblocking(False)
 
 client = NTPClient(socket=sock, server="pool.ntp.org")
@@ -59,23 +59,35 @@ to Unix-epoch seconds — feed it into `time.gmtime` (CPython) /
 
 ## Bring your own transport
 
-`NTPClient` doesn't care which library produces its UDP socket.  The `socket=` (or `socket_factory=`) you pass returns any object exposing the four-method UDP contract:
+`NTPClient` doesn't care which library produces its UDP socket.  The `socket=` (or `transport_factory=`) you pass returns any object exposing the four-method UDP contract:
 
 | Method | Contract |
 |---|---|
-| `sendto(payload, address) -> int` | Sends `payload` (a `bytes`) to `address` (a `(host, port)` tuple).  Raises `OSError(EAGAIN \| EWOULDBLOCK)` when the send buffer is full. |
+| `sendto(payload, host, port) -> int` | Sends `payload` (a `bytes`) to `(host, port)` as separate args.  Raises `OSError(EAGAIN \| EWOULDBLOCK)` when the send buffer is full. |
 | `recvfrom_into(buffer) -> (nbytes, address)` | Reads into `buffer`, returning the byte count and sender.  Raises `OSError(EAGAIN \| EWOULDBLOCK)` on no data. |
 | `close() -> None` | Releases the socket. |
 | `setblocking(flag) -> None` | Best-effort.  Absence is tolerated. |
 
-`chumicro_sockets.udp_socket` is one valid producer.  Stdlib `socket.socket(AF_INET, SOCK_DGRAM)` after `setblocking(False)` is another.  Tests inject `chumicro_sockets.testing.FakeUDPSocket`:
+`chumicro_sockets.udp_socket` is the built-in producer; `chumicro_sockets.testing.FakeUDPSocket` is the test double.  A raw stdlib `socket.socket(AF_INET, SOCK_DGRAM)` does **not** fit directly — its `sendto` takes `(data, address)`, not the separated `(data, host, port)` this contract calls — so wrap it in a small adapter if you must:
 
 ```python
 import socket as stdlib_socket
 
-sock = stdlib_socket.socket(stdlib_socket.AF_INET, stdlib_socket.SOCK_DGRAM)
-sock.setblocking(False)
-client = NTPClient(socket=sock, server="my.lan.ntp")
+class _StdlibUdpAdapter:
+    def __init__(self, sock):
+        self._sock = sock
+    def sendto(self, payload, host, port):
+        return self._sock.sendto(payload, (host, port))
+    def recvfrom_into(self, buffer):
+        return self._sock.recvfrom_into(buffer)
+    def close(self):
+        self._sock.close()
+    def setblocking(self, flag):
+        self._sock.setblocking(flag)
+
+raw = stdlib_socket.socket(stdlib_socket.AF_INET, stdlib_socket.SOCK_DGRAM)
+raw.setblocking(False)
+client = NTPClient(socket=_StdlibUdpAdapter(raw), server="my.lan.ntp")
 ```
 
 If you supply your own transport and want `chumicro_sockets` dropped from the deploy entirely, add a module-level constant to your entrypoint and the chumicro-workspace deployer will filter the default factory out of the import graph:
@@ -85,7 +97,9 @@ If you supply your own transport and want `chumicro_sockets` dropped from the de
 __chumicro_skip_factories__ = ("sockets_factory",)
 ```
 
-Family form (the bare stem) or exact path (`"chumicro_ntp.sockets_factory"`).  An unmatched entry fails the deploy with a typo message rather than silently shipping the default.  Calling `NTPClient.from_config(...)` when `chumicro_ntp.sockets_factory` is missing — either skipped at deploy time or not installed by `circup` / `mip` — raises `RuntimeError` naming the bypass kwargs.
+Family form (the bare stem) or exact path (`"chumicro_sockets.sockets_factory"`).  An unmatched entry fails the deploy with a typo message rather than silently shipping the default.  Calling `NTPClient.from_config(...)` when `chumicro_sockets.sockets_factory` is missing — either skipped at deploy time or not installed by `circup` / `mip` — raises `RuntimeError` naming the bypass kwargs.
+
+For the full single-library adoption recipe — your transport, your `ticks=`, the runner-less drive loop, and host tests with no board — see [Standalone integration](https://github.com/ChuMicro/ChuMicro/blob/main/docs/contributing/standalone-integration.md).
 
 ## Runner pattern
 

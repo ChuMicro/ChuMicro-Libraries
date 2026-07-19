@@ -5,7 +5,7 @@ align="left" width="64" style="margin-right: 16px; margin-bottom: 8px;">
 
 **A non-blocking HTTP/1.1 client — your LED keeps blinking through a TLS handshake.**
 
-A `requests`-flavored surface that advances one chunk per runner tick — connect, send, recv, parse — so your control loop never stalls waiting for a peer.  Plain HTTP, HTTPS (live-verified on real boards), POST / PUT / PATCH / DELETE, JSON helper, redirect handling, and `Transfer-Encoding: chunked` decode.
+A `requests`-flavored surface that advances one chunk per runner tick — connect, send, recv, parse — so your control loop never stalls waiting for a peer.  Plain HTTP, HTTPS (live-verified on real boards), POST / PUT / PATCH / DELETE, JSON helper, redirect handling, `Transfer-Encoding: chunked` decode, and `stream=True` for bodies bigger than RAM — read a firmware image into a 512-byte buffer, chunk by chunk.
 
 <br clear="left">
 
@@ -15,7 +15,7 @@ A `requests`-flavored surface that advances one chunk per runner tick — connec
 
 ```bash
 # CircuitPython (after `circup bundle-add ChuMicro/ChuMicro-Bundle`)
-circup install chumicro-requests
+circup install chumicro_requests
 
 # MicroPython
 mpremote mip install github:ChuMicro/ChuMicro-Bundle/chumicro_requests
@@ -30,10 +30,10 @@ For bundle setup, pre-compiled `.mpy` bundles, the experimental channel, and det
 
 ```python
 from chumicro_requests import HttpClient
-from chumicro_requests.sockets_factory import chumicro_sockets_factory
+from chumicro_sockets.sockets_factory import connector_factory
 from chumicro_timing import ticks_ms
 
-client = HttpClient(connection_factory=chumicro_sockets_factory())
+client = HttpClient(transport_factory=connector_factory())
 handle = client.get("http://api.example.com/now", timeout_ms=5000)
 
 while not handle.done:
@@ -52,12 +52,13 @@ print(response.json())            # parsed JSON when Content-Type is application
 
 | Symbol | Purpose |
 |---|---|
-| `HttpClient` | Runner-shaped HTTP/1.1 client; `check(now_ms)` / `handle(now_ms)`. |
-| `RequestHandle` | Per-request handle: `.done`, `.result`, `.error`. |
-| `Response` | Status code, reason, headers, raw body, URL; `.text`, `.json()`, `.encoding`. |
+| `HttpClient` | Runner-shaped HTTP/1.1 client; `check(now_ms)` / `handle(now_ms)`; per-verb methods plus generic `request(...)`; `stream=True` for incremental bodies; `cancel()` aborts in flight. |
+| `RequestHandle` | Per-request handle: `.done`, `.result`, `.error`; `.read_body_into(buffer)` drains a streamed body. |
+| `Response` | Status code, reason, headers, raw body, URL; `.text`, `.json()`, `.encoding`; `.streamed` on streamed exchanges. |
+| `chumicro_requests.generators` | Opt-in submodule: `yield from`-shaped `fetch` / `get` / `post` / ... one-shots and `stream` + `BodyReader` for chunked body reads under `Runner.add_generator`. |
 | `CaseInsensitiveDict` | Header dict with case-insensitive lookups. |
 | `WhenOversized` | Policy enum for responses past `max_body_bytes`. |
-| `chumicro_requests.sockets_factory.chumicro_sockets_factory(...)` | Opt-in submodule: convenience connection-factory wired to chumicro-sockets. |
+| `chumicro_sockets.sockets_factory.connector_factory(...)` | Shared module: convenience connection-factory wired to chumicro-sockets. |
 | `parse_url(url)` | URL → `(scheme, host, port, path)`. |
 | `parse_charset(content_type)` | Extract charset from a Content-Type header value. |
 | `encode_request(...)` | Build raw HTTP request bytes. |
@@ -67,7 +68,7 @@ print(response.json())            # parsed JSON when Content-Type is application
 
 ## Where this fits
 
-Depends on [`chumicro-sockets`](../sockets/) for TCP / TLS and [`chumicro-timing`](../timing/) for ticks.  Used directly in app code.
+Depends on [`chumicro-sockets`](https://github.com/ChuMicro/ChuMicro/tree/main/libraries/sockets) for TCP / TLS and [`chumicro-timing`](https://github.com/ChuMicro/ChuMicro/tree/main/libraries/timing) for ticks.  Used directly in app code.
 
 ## Platform support
 
@@ -81,7 +82,7 @@ Works on CPython, MicroPython, and CircuitPython.  Pure Python — no native ext
 
 ## Wiring wifi credentials for examples and functional tests
 
-The hardware-prefixed examples + real-network suites in `functional_tests/test_real_*.py` need wifi credentials.  See [`docs/wiring-wifi-credentials.md`](https://github.com/ChuMicro/ChuMicro/blob/main/docs/wiring-wifi-credentials.md) for the workspace-based and raw single-file paths.  The library itself never reads TOML — it takes a `connection_factory` and goes; config wiring is application-layer.
+The hardware-prefixed examples + real-network suites in `functional_tests/test_real_*.py` need wifi credentials.  See [`docs/wiring-wifi-credentials.md`](https://github.com/ChuMicro/ChuMicro/blob/main/docs/wiring-wifi-credentials.md) for the workspace-based and raw single-file paths.  The library itself never reads TOML — it takes a `transport_factory` and goes; config wiring is application-layer.
 
 ## Contributing
 

@@ -2,59 +2,16 @@
 
 from chumicro_requests import (
     HttpBusyError,
-    HttpClient,
     HttpURLError,
 )
+from chumicro_requests.testing import (
+    canned_response,
+    drive_until_done,
+    make_client,
+)
+from chumicro_runner import IO_READ
 from chumicro_sockets.testing import FakeSocket
 from chumicro_test_harness.assertions import raises
-from chumicro_timing.testing import FakeTicks
-
-
-def make_factory(socket_or_factory):
-    """Return a connection_factory that hands out *socket_or_factory*.
-
-    *socket_or_factory* can be either a single :class:`FakeSocket`
-    (returned every call) or a zero-arg callable that builds a fresh
-    one on demand.
-    """
-    def factory(host, port, use_tls):  # noqa: ARG001 — fake ignores args
-        if callable(socket_or_factory):
-            return socket_or_factory()
-        return socket_or_factory
-
-    return factory
-
-def canned_response(*, status=200, reason="OK", body=b"", extra_headers=()):
-    """Build an HTTP/1.1 response byte-string with Content-Length."""
-    lines = [f"HTTP/1.1 {status} {reason}\r\n".encode("ascii")]
-    lines.append(f"Content-Length: {len(body)}\r\n".encode("ascii"))
-    lines.append(b"Content-Type: text/plain\r\n")
-    for name, value in extra_headers:
-        lines.append(f"{name}: {value}\r\n".encode("ascii"))
-    lines.append(b"\r\n")
-    lines.append(body)
-    return b"".join(lines)
-
-def drive_until_done(client, handle, ticks, *, max_ticks=200, advance_ms=1):
-    """Run handle/check until done; safety-cap at *max_ticks* iterations."""
-    for _ in range(max_ticks):
-        if handle.done:
-            return
-        if client.check(ticks.ticks_ms()):
-            client.handle(ticks.ticks_ms())
-        ticks.advance(advance_ms)
-    raise AssertionError(f"handle never completed within {max_ticks} ticks")
-
-def make_client(*, socket_or_factory=None, **kwargs):
-    """Construct an HttpClient wired to FakeTicks + a FakeSocket factory."""
-    ticks = FakeTicks()
-    socket = socket_or_factory if socket_or_factory is not None else FakeSocket()
-    client = HttpClient(
-        connection_factory=make_factory(socket),
-        ticks=ticks,
-        **kwargs,
-    )
-    return client, ticks, socket
 
 
 class TestHttpClientPost:
@@ -141,7 +98,7 @@ class TestHttpClientPost:
 
         handle = client.post("http://example.test/")
         drive_until_done(client, handle, ticks)
-        # No body → no Content-Length added by encode_request
+        # No body: encode_request omits Content-Length.
         assert b"Content-Length:" not in socket.sent
         assert socket.sent.startswith(b"POST / HTTP/1.1\r\n")
 
@@ -191,6 +148,42 @@ class TestHttpClientPost:
         client, _ticks, _ = make_client()
         with raises(HttpURLError):
             client.post("ftp://bad/", body=b"x")
+
+
+class TestRequestBodyRam:
+    """Body bytes aren't held in duplicate longer than a hop needs them."""
+
+    def test_tx_buffer_released_once_send_completes(self):
+        # A recv with no queued response stalls the request in RECEIVING;
+        # the transmit buffer must be empty by then, not still pinning a
+        # second copy of the request bytes through the receive phase.
+        socket = FakeSocket()
+        client, ticks, _ = make_client(socket_or_factory=socket)
+        client.post("http://example.test/api", body=b"payload-body")
+        for _ in range(10):
+            client.handle(ticks.ticks_ms())
+            ticks.advance(1)
+        assert client.io_interest(ticks.ticks_ms()) == IO_READ  # in RECEIVING
+        assert client._tx_buffer == b""  # noqa: SLF001 - released at send end
+        assert client._tx_offset == 0  # noqa: SLF001
+
+    def test_original_body_not_captured_when_redirects_disabled(self):
+        # max_redirects=0 makes 307/308 replay impossible, so the replay
+        # copy of the body must not be retained.
+        socket = FakeSocket()
+        client, _ticks, _ = make_client(socket_or_factory=socket)
+        client.post(
+            "http://example.test/api", body=b"payload-body", max_redirects=0,
+        )
+        assert client._original_body is None  # noqa: SLF001
+
+    def test_original_body_captured_when_redirects_allowed(self):
+        socket = FakeSocket()
+        client, _ticks, _ = make_client(socket_or_factory=socket)
+        client.post(
+            "http://example.test/api", body=b"payload-body", max_redirects=3,
+        )
+        assert client._original_body == b"payload-body"  # noqa: SLF001
 
 
 class TestMergeDefaultHeader:

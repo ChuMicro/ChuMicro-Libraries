@@ -1,16 +1,16 @@
-"""End-to-end integration tests for chumicro_websockets — slice 4.
+"""End-to-end integration tests for chumicro_websockets.
 
 Wires a :class:`WebSocketClient` and a :class:`WebSocketServer` together
 in-process via paired :class:`FakeConnection` objects.  Bytes the
 client writes get pumped into the server's inbound queue between
-ticks, and vice versa — a complete client ↔ server loopback that
+ticks, and vice versa: a complete client / server loopback that
 drives both state machines through the runner contract without any
 real sockets.
 
-Proves the slice 1/2/3 components fit together:
+Proves the wire / session / runner layers fit together:
 
 * The client-side handshake produces bytes the server's
-  :class:`HandshakeRequestParser` accepts; the server's 101 response
+  :class:`HandshakeRequestParser` accepts.  The server's 101 response
   is what the client's :class:`HandshakeResponseParser` validates
   against the derived accept token.
 * Client outbound mask discipline (clients MUST mask) is exactly
@@ -20,6 +20,7 @@ Proves the slice 1/2/3 components fit together:
 * Bidirectional traffic in the same tick survives intact.
 """
 
+from chumicro_sockets.testing import FakeSocketConnector
 from chumicro_timing.testing import FakeTicks
 from chumicro_websockets import (
     CLOSE_GOING_AWAY,
@@ -44,7 +45,7 @@ def _pump(client_socket: FakeConnection, server_socket: FakeConnection) -> None:
 def _build_loopback_pair(*, on_connection):
     """Return ``(client, server, client_socket, server_socket, clock)``.
 
-    Both halves share a FakeTicks; the client's connection_factory
+    Both halves share a FakeTicks; the client's transport_factory
     returns the client-side FakeConnection; the server's listener
     will hand out the server-side FakeConnection on accept.
     """
@@ -60,7 +61,9 @@ def _build_loopback_pair(*, on_connection):
         ticks=clock,
     )
     client = WebSocketClient(
-        connection_factory=lambda *_args, **_kwargs: client_socket,
+        transport_factory=lambda *_args, **_kwargs: FakeSocketConnector(
+            actions=["dns_ok", "tcp_ok"], socket=client_socket,
+        ),
         ticks=clock,
     )
     return client, server, client_socket, server_socket, clock

@@ -1,12 +1,9 @@
-"""Non-blocking WebSocket client + server for CircuitPython, MicroPython, and CPython.
+"""Non-blocking WebSocket client and server for CircuitPython, MicroPython, and CPython.
 
-Built on :mod:`chumicro_sockets` (TCP + TLS) and :mod:`chumicro_timing`
-(ticks).  Both :class:`WebSocketClient` and :class:`WebSocketServer`
-follow the runner contract — :meth:`check(now_ms)` reports work
-pending and :meth:`handle(now_ms)` does one slice of progress per
-call, so an LED keeps blinking through the opening handshake, frame
-I/O, control-frame interleave, and the close handshake.
+The public entry points are :class:`WebSocketClient` and :class:`WebSocketServer`.
 """
+
+import gc
 
 from chumicro_websockets._wire import (
     CLOSE_BAD_DATA,
@@ -33,10 +30,35 @@ from chumicro_websockets._wire import (
     make_websocket_key,
     parse_ws_url,
 )
-from chumicro_websockets.client import WebSocketClient, WhenOversized
-from chumicro_websockets.server import Connection, WebSocketServer
+
+gc.collect()
+
+from chumicro_websockets._session import InboundMessage, WhenOversized  # noqa: E402, I001 - preceded by gc.collect().
+
+gc.collect()
+
+
+def __getattr__(name):
+    # Lazy PEP 562 import keeps the unused client/server half (~20 KB) out of RAM.
+    if name == "WebSocketClient":
+        from chumicro_websockets.client import WebSocketClient  # noqa: PLC0415
+
+        return WebSocketClient
+    if name == "Connection":
+        from chumicro_websockets.server import Connection  # noqa: PLC0415
+
+        return Connection
+    if name == "WebSocketServer":
+        from chumicro_websockets.server import WebSocketServer  # noqa: PLC0415
+
+        return WebSocketServer
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
+    # pyright: ignore[reportUnsupportedDunderAll]: Connection,
+    # WebSocketClient, and WebSocketServer are PEP-562 lazy via
+    # __getattr__.
     "CLOSE_BAD_DATA",
     "CLOSE_GOING_AWAY",
     "CLOSE_INTERNAL_ERROR",
@@ -50,6 +72,7 @@ __all__ = [
     "OPCODE_PONG",
     "OPCODE_TEXT",
     "Connection",
+    "InboundMessage",
     "WebSocketBackpressureError",
     "WebSocketClient",
     "WebSocketError",
@@ -65,3 +88,5 @@ __all__ = [
     "make_websocket_key",
     "parse_ws_url",
 ]
+
+gc.collect()

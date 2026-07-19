@@ -15,7 +15,7 @@ Routing with `@server.route` (method dispatch, path parameters), bounded multi-c
 
 ```bash
 # CircuitPython (after `circup bundle-add ChuMicro/ChuMicro-Bundle`)
-circup install chumicro-http-server
+circup install chumicro_http_server
 
 # MicroPython
 mpremote mip install github:ChuMicro/ChuMicro-Bundle/chumicro_http_server
@@ -30,11 +30,11 @@ For bundle setup, pre-compiled `.mpy` bundles, the experimental channel, and det
 
 ```python
 from chumicro_http_server import HttpServer, build_response
-from chumicro_sockets import tcp_listening_socket
+from chumicro_sockets import listener
 from chumicro_timing import ticks_ms
 
 server = HttpServer(
-    listener_factory=lambda: tcp_listening_socket(host="0.0.0.0", port=8080),
+    transport_factory=lambda: listener(host="0.0.0.0", port=8080),
 )
 
 @server.route("/")
@@ -63,15 +63,31 @@ while True:
 | `Request` | Per-request value object: `method`, `path`, `query`, `headers`, `body`, `json()`, `text()`. |
 | `Response` | Outbound response: `status_code`, `reason`, `headers`, `body`. |
 | `build_response(status, *, body, json, text, html, headers)` | Convenience builder with sensible Content-Type defaults. |
+| `streaming.build_streaming_response(status, *, source, content_length, headers)` | Opt-in `chumicro_http_server.streaming` submodule — serve a body larger than the heap from a fill-a-buffer `source(buffer) -> int` (Content-Length or chunked framing, fixed staging window). |
 | `RequestParser` | Streaming request parser (request line + headers + Content-Length body). |
 | `parse_query` / `split_target` | URL helpers. |
 | `ServerError` + subclasses | Typed exception hierarchy, independent of `chumicro_requests` so the server can ship without the client library. |
 
 Each request is served on a fresh accepted socket and `Connection: close` is added to every response — HTTP/1.1 keep-alive and connection pooling are not supported.  Chunked request bodies are not supported either; use `Content-Length`.
 
+Need to return a body bigger than the heap — a log dump, a file, a long export?  Return a **streaming response** from the opt-in `chumicro_http_server.streaming` submodule and the server drains it from a fill-a-buffer source one small window at a time, choosing Content-Length or chunked framing for you:
+
+```python
+from chumicro_http_server.streaming import build_streaming_response, SOURCE_EOF
+
+@server.route("/log")
+def log_dump(request):
+    def source(buffer):
+        n = read_next_block_into(buffer)   # your storage read; 0 <= n <= len(buffer)
+        return n if n else SOURCE_EOF      # -1 signals end of body
+    return build_streaming_response(200, source=source)
+```
+
+See the [user guide](https://chumicro.github.io/ChuMicro/http_server/stable/guide/#streaming-large-response-bodies) for the source contract, framing rules, fairness, and staging-window sizing.
+
 ## Where this fits
 
-Depends on [`chumicro-sockets`](../sockets/) (TCP listener) and [`chumicro-timing`](../timing/) (ticks).  Pairs with [`chumicro-websockets`](../websockets/) for combined HTTP + WS deployments.  Self-contained otherwise — the shared HTTP/1.1 primitives (case-insensitive header dict, charset parsing) are inlined locally, so a server-only board never ships [`chumicro-requests`](../requests/).
+Depends on [`chumicro-sockets`](https://github.com/ChuMicro/ChuMicro/tree/main/libraries/sockets) (TCP listener) and [`chumicro-timing`](https://github.com/ChuMicro/ChuMicro/tree/main/libraries/timing) (ticks).  Pairs with [`chumicro-websockets`](https://github.com/ChuMicro/ChuMicro/tree/main/libraries/websockets) for combined HTTP + WS deployments.  Self-contained otherwise — the shared HTTP/1.1 primitives (case-insensitive header dict, charset parsing) are inlined locally, so a server-only board never ships [`chumicro-requests`](https://github.com/ChuMicro/ChuMicro/tree/main/libraries/requests).
 
 ## Platform support
 
@@ -82,22 +98,24 @@ Works on CPython, MicroPython, and CircuitPython.  Pure Python — no native ext
 `chumicro-http-server` itself is transport-agnostic — pass a TLS-wrapped
 listener from
 [`chumicro_sockets.ssl_context_with_cert_and_key_paths`](https://github.com/ChuMicro/ChuMicro/tree/main/libraries/sockets)
-into `listener_factory` and the same `HttpServer` runs HTTPS.  Live
+into `transport_factory` and the same `HttpServer` runs HTTPS.  Live
 verification across the supported board matrix:
 
 | Runtime + board | TLS server status | Notes |
 |---|---|---|
-| CircuitPython on ESP32-S2 (Lolin S2) | ✅ Works | ~6 KB context + ~35 KB handshake heap. |
-| CircuitPython on rp2 (Pi Pico W / Pi Pico 2 W) | ❌ Refused (`UnsupportedSSLConfigError`) | `chumicro_sockets.tls_listening_socket` raises up-front; the underlying CYW43 TLS path raises `OSError(32)` mid-handshake AND wedges the chip's station-mode state. Use ESP32-family or MicroPython on rp2. |
+| CircuitPython on ESP32-S2 (Lolin S2) | ✅ Works | Bench-tested ~5 KB context (RSA-2048); each connection adds tens of KB during handshake — leave headroom. |
+| CircuitPython on rp2 (Pi Pico W / Pi Pico 2 W) | ❌ Refused (`UnsupportedSSLConfigError`) | `chumicro_sockets.listener(tls=True)` raises up-front; the underlying CYW43 TLS path raises `OSError(32)` mid-handshake AND wedges the chip's station-mode state. Use ESP32-family or MicroPython on rp2. |
 | MicroPython on ESP32-S2 | ✅ Works | Hardware-accelerated handshake; ~1 KB heap. |
 | MicroPython on rp2 (Pi Pico W) | ✅ Works (RSA-2048 only) | DER-encoded key; ~25 KB handshake heap; ECC keys fail at context build. |
 
 > **Why the CP-on-rp2 row?**  The CYW43 stack's TLS server path raises `OSError(32)` mid-handshake and wedges the chip's station state until a USB power-cycle.  No upstream fix is in flight; for HTTPS server work on rp2, use MicroPython.
 
-The TLS handshake is synchronous inside `wrap_socket(..., server_side=True)`;
-budget for a ~100–500 ms listener stall during accept.  Once the
-handshake completes, the per-connection state machine resumes its
-runner-shaped, LED-blink-friendly progression.
+The TLS handshake is synchronous inside `wrap_socket(..., server_side=True)`:
+the listener stalls until it completes — single-digit to tens of
+milliseconds on the supported board class with a local TLS client, longer
+on a slow uplink as TLS rounds-trip.  Once the handshake completes, the
+per-connection state machine resumes its runner-shaped,
+LED-blink-friendly progression.
 
 ## Examples
 
@@ -107,7 +125,7 @@ runner-shaped, LED-blink-friendly progression.
 
 ## Wiring wifi credentials for examples and functional tests
 
-The hardware-prefixed examples + real-network suites in `functional_tests/test_real_*.py` need wifi credentials.  See [`docs/wiring-wifi-credentials.md`](https://github.com/ChuMicro/ChuMicro/blob/main/docs/wiring-wifi-credentials.md) for the workspace-based and raw single-file paths.  The library itself never reads TOML — it takes a `listener_factory` and goes; config wiring is application-layer.
+The hardware-prefixed examples + real-network suites in `functional_tests/test_real_*.py` need wifi credentials.  See [`docs/wiring-wifi-credentials.md`](https://github.com/ChuMicro/ChuMicro/blob/main/docs/wiring-wifi-credentials.md) for the workspace-based and raw single-file paths.  The library itself never reads TOML — it takes a `transport_factory` and goes; config wiring is application-layer.
 
 ## Contributing
 

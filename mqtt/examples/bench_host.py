@@ -1,6 +1,6 @@
 """Optional host-side companion to ``bench.py``.
 
-``bench.py`` is fully self-driving — it runs every scenario on-device,
+``bench.py`` is fully self-driving.  It runs every scenario on-device,
 prints a summary table to serial, and publishes a one-line verdict to
 ``<client_id>/bench-summary``.  Nothing here is required for the
 self-driving run.
@@ -11,7 +11,7 @@ What this script adds (when you want it):
   ``<client_id>/bench-summary`` and prints the device's verdict line.
   Useful in headless / CI setups where you don't want to babysit a
   serial console.
-* **Truly hostile tier-3 payloads.**  Optionally publishes a much
+* **Truly hostile oversized payloads.**  Optionally publishes a much
   larger payload than the device could comfortably build on its own
   (e.g. 64 KB) so you can verify the on-device oversize-drain path
   stays heap-bounded even against a hostile sender.  Use ``--hostile``.
@@ -28,14 +28,14 @@ Usage
 
 ::
 
-    # Default — just listen for the device's bench-summary verdict.
-    python bench_host.py --broker 172.16.1.15
+    # Default: just listen for the device's bench-summary verdict.
+    python bench_host.py --broker mqtt.example.com
 
     # Publish a 64 KB hostile payload first, then listen for the verdict.
-    python bench_host.py --broker 172.16.1.15 --hostile
+    python bench_host.py --broker mqtt.example.com --hostile
 
     # Different client_id (matches the CLIENT_ID constant in bench.py).
-    python bench_host.py --broker 172.16.1.15 --client-id my-thing
+    python bench_host.py --broker mqtt.example.com --client-id my-thing
 
 The device's bench publishes its verdict after the keepalive scenario
 ends (~3.5 minutes after start).  This script exits after the verdict
@@ -47,7 +47,7 @@ import sys
 import time
 
 try:
-    import paho.mqtt.client as mqtt  # noqa: PLC0415 — host-side optional dep
+    import paho.mqtt.client as mqtt  # noqa: PLC0415 - host-side optional dep
 except ImportError:
     sys.stderr.write(
         "this example needs paho-mqtt; install with `pip install paho-mqtt`\n"
@@ -70,7 +70,7 @@ def main():
     )
     parser.add_argument(
         "--hostile", action="store_true",
-        help="Publish a 64 KB payload before listening — extra tier-3 stress.",
+        help="Publish a 64 KB payload before listening — extra oversized-tier stress.",
     )
     parser.add_argument(
         "--hostile-bytes", type=int, default=65536,

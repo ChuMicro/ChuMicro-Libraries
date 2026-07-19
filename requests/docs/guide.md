@@ -2,16 +2,44 @@
 
 ## Overview
 
-`chumicro-requests` is a non-blocking HTTP/1.1 client built on `chumicro-sockets`.  `HttpClient` is the single entry point for every verb — its `check(now_ms)` / `handle(now_ms)` methods drive the request forward one tick at a time.  An LED keeps blinking on the same board while a request is in flight, in a TLS handshake, or mid-timeout against a stalled peer.  The library is single-in-flight today — a second `client.get(...)` while another request is running raises `HttpBusyError`.
+`chumicro-requests` is a non-blocking HTTP/1.1 client built on `chumicro-sockets`.  `HttpClient` is the single entry point for every verb — its `check(now_ms)` / `handle(now_ms)` methods drive the request forward one tick at a time.  An LED keeps blinking on the same board while a request is in flight or mid-timeout against a stalled peer.  Two connect phases are the exception: the DNS lookup, and on MicroPython / CircuitPython the TLS handshake, each block the reactor for their duration (see *Bring your own transport*).  The library is single-in-flight today — a second `client.get(...)` while another request is running raises `HttpBusyError`.
 
-## Getting started
+## Getting started with generators
+
+The generator surface runs a whole request top to bottom (connect, send, receive, return) with no handle to poll and no `on_done` callback.  A single `response = yield from get(...)` drives the request under `Runner.add_generator`, and other runner services keep getting the CPU between yields.
+
+```python
+from chumicro_requests.generators import get
+from chumicro_runner import Runner
+from chumicro_sockets.sockets_factory import connector_factory
+
+transport_factory = connector_factory(radio=wifi.radio)
+
+
+def fetch_once():
+    response = yield from get(transport_factory, "http://api.example.com/now")
+    print(response.status_code, len(response.body))
+
+
+runner = Runner()
+handle = runner.add_generator(fetch_once())
+while not handle.done:
+    now_ms = runner.tick()
+    runner.wait(now_ms)
+```
+
+`chumicro_requests.generators` also exposes `post`, `put`, `patch`, `delete`, and the lower-level `fetch(transport_factory, method, url)`.  For a body too big for RAM, `stream(...)` returns a reader you pull one chunk per `yield from` (see [Streaming large bodies](#streaming-large-bodies)).
+
+## Getting started with a service
+
+Reach for the `HttpClient` service when you make repeated requests on one client, or when you want the `check` / `handle` shape that drops straight into a `Runner` alongside other services.
 
 ```python
 from chumicro_requests import HttpClient
-from chumicro_requests.sockets_factory import chumicro_sockets_factory
+from chumicro_sockets.sockets_factory import connector_factory
 from chumicro_timing import ticks_ms
 
-client = HttpClient(connection_factory=chumicro_sockets_factory(radio=wifi.radio))
+client = HttpClient(transport_factory=connector_factory(radio=wifi.radio))
 handle = client.get("http://api.example.com/now", timeout_ms=5000)
 
 while not handle.done:
@@ -23,6 +51,8 @@ print(response.status_code, response.body)
 print(response.text)               # decoded str
 print(response.json())             # parsed JSON
 ```
+
+Build your client at startup. The first `HttpClient` reference imports the client module, so let that one-time cost land on a fresh heap.
 
 ## POST / PUT / PATCH / DELETE
 
@@ -63,7 +93,7 @@ handle = client.get(url, max_redirects=0)
 handle = client.get(url, max_redirects=20)
 
 # Per-client default
-client = HttpClient(connection_factory=..., default_max_redirects=10)
+client = HttpClient(transport_factory=..., default_max_redirects=10)
 ```
 
 Method handling follows long-standing browser + RFC 7231 §6.4 rules:
@@ -99,6 +129,77 @@ Other `Transfer-Encoding` values (`gzip`, `deflate`, `identity`
 stacked with chunked, etc.) are rejected with `HttpProtocolError`
 in v1 — the caller would otherwise silently get garbled bytes.
 
+## Streaming large bodies
+
+By default the whole body is buffered in RAM, capped at
+`max_body_bytes` (64 KB).  Pass `stream=True` — on any verb, or on the
+generic `client.request(method, url, ...)` — to consume the body
+incrementally instead: firmware images, log pulls, and any payload
+bigger than the heap become readable at a fixed RAM cost (the
+`stream_buffer_size` staging window, default 1024 bytes, plus your own
+buffer).
+
+```python
+handle = client.get("http://host/firmware.bin", stream=True,
+                    timeout_ms=120_000)
+buffer = bytearray(512)
+view = memoryview(buffer)
+
+# Inside your service's handle(now_ms) — one slice per tick:
+if handle.done and handle.error is not None:
+    report(handle.error)                    # failed mid-transfer
+elif handle.response is not None:           # headers are in
+    count = handle.read_body_into(view)
+    if count:
+        flash.write(view[:count])
+    elif handle.done:
+        finish()                             # 0 after done == end of body
+```
+
+The contract:
+
+- `handle.response` is set as soon as the final hop's headers arrive —
+  before `handle.done` — so you can branch on `status_code` /
+  `headers` first.  Its `body` is `b""` and `streamed` is `True`;
+  `.text` / `.json()` raise `HttpError`.
+- `handle.read_body_into(buffer)` copies decoded body bytes into your
+  buffer and returns the count.  `0` means "nothing this tick"; once
+  `handle.done` is `True` (with no `error`), `0` means end of body.
+- Backpressure is automatic: when the staging window is full the
+  client stops reading the socket (and reports no poll interest, so a
+  runner parks instead of spinning) until you drain it.
+- `max_body_bytes` and `WhenOversized` do not apply to streamed
+  bodies — the staging window is the RAM bound.  To enforce your own
+  ceiling, count what you read and call `client.cancel()`.
+- `timeout_ms` covers the whole transfer, your reads included — size
+  it for the download, not the round-trip.
+- `client.cancel()` aborts the request immediately (the handle fails
+  with `HttpError`), for early exits that shouldn't wait out the
+  timeout.
+
+The generator form wraps the same machinery, one chunk per
+`yield from`:
+
+```python
+from chumicro_requests.generators import stream
+
+def download(transport_factory, url, sink):
+    reader = yield from stream(transport_factory, "GET", url,
+                               timeout_ms=120_000)
+    if reader.response.status_code != 200:
+        reader.cancel()
+        return
+    buffer = bytearray(512)
+    view = memoryview(buffer)
+    while True:
+        count = yield from reader.read_into(view)
+        if count == 0:
+            break
+        sink(view[:count])
+
+runner.add_generator(download(transport_factory, url, flash.write))
+```
+
 ## Body decoding
 
 `Response.body` is always raw `bytes`.  `Response.text` decodes those
@@ -115,17 +216,20 @@ print(response.text)
 `Response.json()` decodes via `text` first, then runs `json.loads`,
 so charset overrides apply to JSON responses too.
 
-The `connection_factory` argument is a callable
-`(host, port, use_tls) -> TCPClientSocket`. The bundled
-`chumicro_requests.sockets_factory.chumicro_sockets_factory(radio=..., ssl_context=...)`
+The `transport_factory` argument is a callable
+`(host, port, use_tls) -> SocketConnector` — a tick-driven connector,
+not a ready socket (see [Bring your own transport](#bring-your-own-transport)
+below for the connector contract). The bundled
+`chumicro_sockets.sockets_factory.connector_factory(radio=..., ssl_context=...)`
 returns one wired to `chumicro-sockets`. The helper lives in an opt-in
 submodule so users with a custom transport never trigger the
-`chumicro-sockets` deploy. Tests typically pass a hand-rolled factory
-that returns a `chumicro_sockets.testing.FakeSocket`.
+`chumicro-sockets` deploy. Tests pass a factory returning a
+`chumicro_sockets.testing.FakeSocketConnector` (which wraps a
+`FakeSocket`).
 
 ## Bring your own transport
 
-`HttpClient` does not care which library produces its sockets.  The `connection_factory` you pass is a callable of shape `(host: str, port: int, use_tls: bool) -> socket` that returns any object exposing the four-method contract:
+`HttpClient` does not care which library produces its sockets.  The `transport_factory` you pass is a callable of shape `(host: str, port: int, use_tls: bool) -> SocketConnector`.  The connector advances the TCP connect one tick at a time, but the DNS lookup and, on MicroPython / CircuitPython, the TLS handshake block the reactor for their duration — on a slow or unreachable host that can be seconds, freezing every other runner service, so connect before starting time-critical work.  Once `connector.state == "ready"`, the underlying socket must expose the four-method contract:
 
 | Method | Contract |
 |---|---|
@@ -134,19 +238,7 @@ that returns a `chumicro_sockets.testing.FakeSocket`.
 | `close() -> None` | Releases the connection. |
 | `setblocking(flag) -> None` | Best-effort.  Absence is tolerated. |
 
-`chumicro_sockets.tcp_client_socket` / `tls_client_socket` is one producer.  Stdlib `socket.socket` after `setblocking(False)` is another.  Hand-rolled wrappers around any upstream library work the same way:
-
-```python
-import socket as stdlib_socket
-
-def make_connection(host, port, use_tls):
-    sock = stdlib_socket.socket(stdlib_socket.AF_INET, stdlib_socket.SOCK_STREAM)
-    sock.connect((host, port))
-    sock.setblocking(False)
-    return sock  # use_tls handled by caller's wrapper if needed
-
-client = HttpClient(connection_factory=make_connection)
-```
+`chumicro_sockets.connector` is one producer.  See `chumicro_sockets._connector.SocketConnector` for the connector contract (`tick(now_ms)`, `state`, `socket`, `io_*`, `next_deadline`, `cancel`) — any tick-driven state machine with that surface works as a custom factory.
 
 If you supply your own factory and want `chumicro_sockets` dropped from the deploy, add a module-level constant to your entrypoint and the chumicro-workspace deployer will filter the default factory out of the import graph:
 
@@ -155,7 +247,9 @@ If you supply your own factory and want `chumicro_sockets` dropped from the depl
 __chumicro_skip_factories__ = ("sockets_factory",)
 ```
 
-The constant accepts a family form (the bare stem, matches every `chumicro_*.sockets_factory`) or an exact dotted path (`chumicro_requests.sockets_factory`).  An unmatched entry fails the deploy with a typo message rather than silently shipping the default.  Calling `HttpClient.from_config(...)` when `chumicro_requests.sockets_factory` is missing — either skipped at deploy time or not installed by `circup` / `mip` — raises `RuntimeError` naming the bypass kwarg.
+The constant accepts a family form (the bare stem, matches every `chumicro_*.sockets_factory`) or an exact dotted path (`chumicro_sockets.sockets_factory`).  An unmatched entry fails the deploy with a typo message rather than silently shipping the default.  Calling `HttpClient.from_config(...)` when `chumicro_sockets.sockets_factory` is missing — either skipped at deploy time or not installed by `circup` / `mip` — raises `RuntimeError` naming the bypass kwarg.
+
+For the full single-library adoption recipe — your transport, your `ticks=`, the runner-less drive loop, and host tests with no board — see [Standalone integration](https://github.com/ChuMicro/ChuMicro/blob/main/docs/contributing/standalone-integration.md).
 
 ## Runner pattern
 
@@ -166,9 +260,9 @@ LED-heartbeat task:
 ```python
 from chumicro_runner import Runner
 from chumicro_requests import HttpClient
-from chumicro_requests.sockets_factory import chumicro_sockets_factory
+from chumicro_sockets.sockets_factory import connector_factory
 
-http_client = HttpClient(connection_factory=chumicro_sockets_factory(radio=radio))
+http_client = HttpClient(transport_factory=connector_factory(radio=radio))
 runner = Runner([http_client, blink_task])
 while True:
     runner.tick(ticks_ms())
@@ -181,13 +275,17 @@ supported board class (256 KB MCU RAM). Bump it for larger boards if needed; the
 buffer grows up to that cap. The default 1024-byte `recv_budget_per_tick`
 matches `chumicro-mqtt`'s — bytes drained per tick are bounded so concurrent
 runner tasks (LED blink, control loop) keep getting CPU time even mid-large-body.
+For bodies that shouldn't (or can't) sit in RAM at all, use
+`stream=True` — see [Streaming large bodies](#streaming-large-bodies):
+the per-request cost drops to the `stream_buffer_size` staging window
+(default 1024 bytes) regardless of body size.
 
 ## Platform notes
 
 Pure Python, no third-party deps beyond `chumicro-sockets` and `chumicro-timing`.
 Works identically on CPython, MicroPython, and CircuitPython once the
 connection factory is wired up. HTTPS uses the same
-`chumicro_requests.sockets_factory.chumicro_sockets_factory(ssl_context=...)`
+`chumicro_sockets.sockets_factory.connector_factory(ssl_context=...)`
 pattern as plain HTTP.
 
 ### HTTPS heap headroom on minimum-class boards
@@ -206,7 +304,7 @@ handshake.
 
 ### TLS context — bring your own CA
 
-`chumicro_requests.sockets_factory.chumicro_sockets_factory(ssl_context=...)`
+`chumicro_sockets.sockets_factory.connector_factory(ssl_context=...)`
 accepts an SSL context built via `chumicro_sockets.ssl_context_with_ca(pem)`.
 CA-pinning is required
 on both supported embedded runtimes — but for different reasons:

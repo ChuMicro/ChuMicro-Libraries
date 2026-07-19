@@ -48,7 +48,7 @@ class TestEncodeFrame:
 
     def test_unmasked_64bit_length(self):
         # The 64-bit length prefix only triggers at payloads >= 65536
-        # bytes — 4x the library's 16 KB DEFAULT_MAX_MESSAGE_BYTES.  The
+        # bytes (4x the library's 16 KB DEFAULT_MAX_MESSAGE_BYTES).  The
         # ~64 KB payload plus its encoded copy exceeds a 264 KB board's
         # contiguous-allocation headroom.  This is an intrinsic single
         # allocation, not the resident co-residency a file split fixes,
@@ -92,6 +92,13 @@ class TestEncodeFrame:
         encoded = encode_frame(OPCODE_PING, b"", mask=b"mask")
         # Empty payload still includes mask bytes.
         assert encoded == b"\x89\x80mask"
+
+    def test_returns_bytearray_for_zero_copy_send(self):
+        # encode_frame returns its working bytearray directly rather than
+        # a bytes() snapshot; socket.send accepts a bytearray buffer, so
+        # the send path skips a full-frame copy.
+        encoded = encode_frame(OPCODE_TEXT, b"hi")
+        assert isinstance(encoded, bytearray)
 
     def test_make_mask_key_length(self):
         assert len(make_mask_key()) == 4

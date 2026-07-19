@@ -1,12 +1,6 @@
-"""Non-blocking MQTT 3.1.1 client for CircuitPython, MicroPython, and CPython.
+"""Non-blocking MQTT 3.1.1 client for CircuitPython, MicroPython, and CPython."""
 
-Built on :mod:`chumicro_sockets` (TCP + TLS) and :mod:`chumicro_timing`
-(ticks).  Tick-based runner contract — :meth:`MQTTClient.check(now_ms)`
-reports whether work is pending and :meth:`handle(now_ms)` does one
-slice of progress per call.
-
-QoS 0 + QoS 1 supported; QoS 2 raises :class:`UnsupportedQoSError`.
-"""
+import gc
 
 from chumicro_mqtt._wire import (
     MQTTBackpressureError,
@@ -14,21 +8,35 @@ from chumicro_mqtt._wire import (
     MQTTError,
     MQTTProtocolError,
     UnsupportedQoSError,
-    decode_varlen,
-    encode_connect,
-    encode_puback,
-    encode_publish,
-    encode_string,
-    encode_subscribe,
-    encode_unsubscribe,
-    encode_varlen,
     topic_matches,
 )
-from chumicro_mqtt.client import MQTTClient, MQTTPublisher, ProtocolState, WhenOversized
+
+gc.collect()
+
+
+def __getattr__(name):
+    if name in (
+        "InboundPublish",
+        "MQTTClient",
+        "ProtocolState",
+        "WhenOversized",
+        "default_client_id",
+    ):
+        # Lazy-import the largest module so boards that never build a client
+        # pay no RAM; collect first so it compiles into a swept heap.
+        gc.collect()
+        import chumicro_mqtt.client as _client  # noqa: PLC0415
+
+        return getattr(_client, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
+    # pyright: ignore[reportUnsupportedDunderAll]: InboundPublish,
+    # MQTTClient, ProtocolState, and WhenOversized are PEP-562 lazy via
+    # __getattr__.
+    "InboundPublish",
     "MQTTClient",
-    "MQTTPublisher",
     "MQTTBackpressureError",
     "MQTTConnectError",
     "MQTTError",
@@ -36,13 +44,8 @@ __all__ = [
     "ProtocolState",
     "UnsupportedQoSError",
     "WhenOversized",
-    "decode_varlen",
-    "encode_connect",
-    "encode_puback",
-    "encode_publish",
-    "encode_string",
-    "encode_subscribe",
-    "encode_unsubscribe",
-    "encode_varlen",
+    "default_client_id",
     "topic_matches",
 ]
+
+gc.collect()

@@ -1,6 +1,9 @@
-"""Tests for the streaming inbound packet decoder."""
+"""Tests for the streaming inbound packet decoder (parsing happy paths).
 
-from chumicro_mqtt import MQTTProtocolError
+The edge / fault paths — varlen wedge, protocol errors, the oversized
+tier — live in ``test_decoder_error_paths.py`` (suite-slimming split).
+"""
+
 from chumicro_mqtt._wire import (
     PACKET_CONNACK,
     PACKET_PINGRESP,
@@ -10,7 +13,6 @@ from chumicro_mqtt._wire import (
     PacketDecoder,
     ParsedAck,
     ParsedPublish,
-    _OversizedMessage,
 )
 from chumicro_mqtt.testing import (
     canned_connack_bytes,
@@ -20,7 +22,6 @@ from chumicro_mqtt.testing import (
     canned_suback_bytes,
     canned_unsuback_bytes,
 )
-from chumicro_test_harness.assertions import raises
 
 
 def _feed(decoder: PacketDecoder, payload: bytes) -> None:
@@ -123,7 +124,7 @@ class TestParsePublish:
 
 class TestStreaming:
     def test_partial_then_complete(self) -> None:
-        """Half a packet first; second feed completes it."""
+        """Half a packet first.  Second feed completes it."""
         decoder = PacketDecoder()
         whole = canned_connack_bytes(return_code=0)
         _feed(decoder, whole[:2])
@@ -146,7 +147,7 @@ class TestStreaming:
         assert third is None
 
     def test_one_byte_at_a_time(self) -> None:
-        """Trickled bytes still parse cleanly — every byte is individually fed."""
+        """Trickled bytes still parse cleanly.  Every byte is individually fed."""
         decoder = PacketDecoder()
         whole = canned_publish_bytes("hello", b"world", qos=0)
         for byte_value in whole:
@@ -155,132 +156,3 @@ class TestStreaming:
         packet = decoder.read_next()
         assert packet.topic == "hello"
         assert packet.payload == b"world"
-
-
-class TestProtocolErrors:
-    def test_unknown_packet_type(self) -> None:
-        decoder = PacketDecoder()
-        # 0xF0 is the reserved high-nibble for AUTH (MQTT 5 only).
-        _feed(decoder, b"\xf0\x00")
-        with raises(MQTTProtocolError):
-            decoder.read_next()
-
-    def test_publish_shorter_than_topic_length_prefix_raises(self) -> None:
-        # PUBLISH (0x30) with a 0-byte body: no room for the 2-byte
-        # topic-length prefix.  Must be a classified protocol error,
-        # not a raw struct/ValueError from the unpack.
-        decoder = PacketDecoder()
-        _feed(decoder, b"\x30\x00")
-        with raises(MQTTProtocolError):
-            decoder.read_next()
-
-    def test_oversized_simple_ack_raises(self) -> None:
-        """SUBACK with body longer than buffer is a protocol error,
-        not an oversize-message event."""
-        decoder = PacketDecoder(rx_buffer_size=8)
-        # Synthesize a SUBACK with body length > buffer.
-        body_length = 100
-        packet = bytes((0x90, body_length)) + b"\x00" * body_length
-        # Feed enough to trip the size check.
-        decoder.fill_buffer()[:2] = packet[:2]
-        decoder.advance(2)
-        with raises(MQTTProtocolError):
-            decoder.read_next()
-
-
-def _drive_until_done(decoder: PacketDecoder, packet: bytes, chunk_size: int = 32) -> list:
-    """Feed *packet* through *decoder* in chunks, collecting parsed events."""
-    events: list = []
-    offset = 0
-    while offset < len(packet):
-        chunk = packet[offset:offset + chunk_size]
-        offset += chunk_size
-        room = decoder.fill_capacity()
-        if room == 0:
-            event = decoder.read_next()
-            if event is not None:
-                events.append(event)
-            continue
-        write = chunk[:room]
-        decoder.fill_buffer()[:len(write)] = write
-        decoder.advance(len(write))
-        event = decoder.read_next()
-        if event is not None:
-            events.append(event)
-    while True:
-        event = decoder.read_next()
-        if event is None:
-            break
-        events.append(event)
-    return events
-
-
-class TestIntactTier:
-    """Tier 2: PUBLISH > rx_buffer_size, ≤ max_message_bytes → ParsedPublish (intact)."""
-
-    def test_publish_between_steady_and_cap_delivers_intact(self) -> None:
-        """A 200-byte payload on a 64-byte rx + 8192 cap routes through tier 2."""
-        decoder = PacketDecoder(
-            rx_buffer_size=64,
-            max_message_bytes=8192,
-        )
-        big_payload = b"x" * 200
-        packet = canned_publish_bytes("log", big_payload, qos=0)
-        events = _drive_until_done(decoder, packet, chunk_size=32)
-        publishes = [event for event in events if isinstance(event, ParsedPublish)]
-        assert len(publishes) == 1
-        assert publishes[0].topic == "log"
-        assert publishes[0].payload == big_payload
-        # No oversize event for a tier-2 message.
-        assert not any(isinstance(event, _OversizedMessage) for event in events)
-
-    def test_intact_qos1_carries_packet_id(self) -> None:
-        decoder = PacketDecoder(rx_buffer_size=64, max_message_bytes=8192)
-        payload = b"y" * 300
-        packet = canned_publish_bytes("data", payload, qos=1, packet_id=1234)
-        events = _drive_until_done(decoder, packet, chunk_size=24)
-        publishes = [event for event in events if isinstance(event, ParsedPublish)]
-        assert len(publishes) == 1
-        assert publishes[0].qos == 1
-        assert publishes[0].packet_id == 1234
-        assert publishes[0].payload == payload
-
-
-class TestOversizedTier:
-    """Tier 3: PUBLISH > max_message_bytes → _OversizedMessage (payload dropped)."""
-
-    def test_publish_above_cap_drains_and_reports_length(self) -> None:
-        decoder = PacketDecoder(
-            rx_buffer_size=64,
-            max_message_bytes=100,  # 200-byte payload exceeds this
-        )
-        big_payload = b"x" * 200
-        packet = canned_publish_bytes("log", big_payload, qos=0)
-        events = _drive_until_done(decoder, packet, chunk_size=32)
-        oversized = [event for event in events if isinstance(event, _OversizedMessage)]
-        assert len(oversized) == 1
-        assert oversized[0].topic == "log"
-        # reported_length is the MQTT remaining-length value
-        # (topic prelude + payload).
-        # topic_length_field (2) + "log" (3) + payload (200) = 205.
-        assert oversized[0].reported_length == 205
-
-    def test_oversize_topic_emits_none_topic(self) -> None:
-        """Topic alone exceeds rx_buffer_size → event with topic=None (deadlock fix)."""
-        decoder = PacketDecoder(
-            rx_buffer_size=16,        # tiny — even modest topics overflow
-            max_message_bytes=32,
-        )
-        long_topic = "a" * 50
-        packet = canned_publish_bytes(long_topic, b"x", qos=0)
-        events = _drive_until_done(decoder, packet, chunk_size=8)
-        oversized = [event for event in events if isinstance(event, _OversizedMessage)]
-        assert len(oversized) == 1
-        assert oversized[0].topic is None
-        # Decoder should be back to steady state — feed a normal small
-        # packet and verify it parses cleanly.
-        small_packet = canned_publish_bytes("a", b"b", qos=0)
-        events2 = _drive_until_done(decoder, small_packet, chunk_size=8)
-        publishes = [event for event in events2 if isinstance(event, ParsedPublish)]
-        assert len(publishes) == 1
-        assert publishes[0].topic == "a"

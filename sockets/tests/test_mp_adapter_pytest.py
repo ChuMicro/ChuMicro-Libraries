@@ -18,6 +18,7 @@ from __future__ import annotations
 #: CPython-only lane (pytest fixtures / host stdlib); not cross-runtime.
 __chumicro_runtimes__ = ("cpython",)
 
+import errno
 import importlib
 import sys
 import types
@@ -31,15 +32,18 @@ if TYPE_CHECKING:  # pragma: no cover — type-only
 
 @pytest.fixture
 def mp_adapter() -> Iterator[types.ModuleType]:
-    """Stub ``socket`` + ``ssl`` and yield a freshly-reloaded MP adapter.
+    """Stub ``socket`` + ``ssl`` + ``select`` and yield a freshly-reloaded MP adapter.
 
-    Captures sent calls into ``adapter._calls`` (we add the attribute
-    on the stub-side socket module) so individual tests can assert
-    against it.  Restores the original modules on teardown.
+    The ``select`` stub's ``poll`` reports every registered socket as
+    immediately POLLOUT-ready, so the MP connector's TCP phase
+    completes on its next tick without touching a real poller (the
+    stub sockets aren't real file descriptors).  Restores the original
+    modules on teardown.
     """
 
     real_socket = sys.modules.get("socket")
     real_ssl = sys.modules.get("ssl")
+    real_select = sys.modules.get("select")
 
     fake_socket = types.ModuleType("socket")
 
@@ -69,6 +73,21 @@ def mp_adapter() -> Iterator[types.ModuleType]:
                 return b""
             chunk = self.recv_queue.pop(0)
             return chunk[:size] if len(chunk) > size else chunk
+
+        def readinto(self, buffer: bytearray, nbytes: int | None = None) -> int | None:
+            # Mirrors MP's stream ``readinto(buffer[, nbytes])``: copies
+            # up to ``nbytes`` (default: len(buffer)) from the recv queue
+            # into ``buffer``, returns the count, returns 0 on a clean
+            # close (empty queue).  A None return (would-block) is
+            # simulated per-test by overriding this method.
+            limit = len(buffer) if nbytes is None else min(nbytes, len(buffer))
+            if not self.recv_queue:
+                return 0
+            chunk = self.recv_queue.pop(0)
+            if len(chunk) > limit:
+                chunk = chunk[:limit]
+            buffer[: len(chunk)] = chunk
+            return len(chunk)
 
         def close(self) -> None:
             self._closed = True
@@ -120,8 +139,28 @@ def mp_adapter() -> Iterator[types.ModuleType]:
     fake_ssl._free_wrap_calls = []  # type: ignore[attr-defined]
     fake_ssl._StubContext = _StubContext  # type: ignore[attr-defined]
 
+    fake_select = types.ModuleType("select")
+
+    class _StubPoll:
+        """Reports every registered object as POLLOUT-ready immediately."""
+
+        def __init__(self) -> None:
+            self._registered: list[object] = []
+
+        def register(self, sock: object, _mask: int) -> None:
+            self._registered.append(sock)
+
+        def poll(self, _timeout_ms: int) -> list[tuple[object, int]]:
+            return [(sock, fake_select.POLLOUT) for sock in self._registered]  # type: ignore[attr-defined]
+
+    fake_select.POLLOUT = 4  # type: ignore[attr-defined]
+    fake_select.POLLERR = 8  # type: ignore[attr-defined]
+    fake_select.POLLHUP = 16  # type: ignore[attr-defined]
+    fake_select.poll = _StubPoll  # type: ignore[attr-defined]
+
     sys.modules["socket"] = fake_socket
     sys.modules["ssl"] = fake_ssl
+    sys.modules["select"] = fake_select
     # Drop a cached mp adapter (if any) so the reload picks up our stubs.
     sys.modules.pop("chumicro_sockets._adapters.mp", None)
     mp_module = importlib.import_module("chumicro_sockets._adapters.mp")
@@ -139,29 +178,61 @@ def mp_adapter() -> Iterator[types.ModuleType]:
         sys.modules["ssl"] = real_ssl
     else:  # pragma: no cover — only matters if the test was run before ssl imported
         sys.modules.pop("ssl", None)
+    if real_select is not None:
+        sys.modules["select"] = real_select
+    else:  # pragma: no cover — only matters if the test was run before select imported
+        sys.modules.pop("select", None)
 
 
-class TestConnectTcp:
+def _connect(
+    mp_adapter: types.ModuleType,
+    host: str,
+    port: int,
+    *,
+    tls: bool = False,
+    context: object | None = None,
+) -> object:
+    """Drive ``mp_adapter.connector`` to ``ready``; return the wrapped socket.
+
+    The stubbed ``select.poll`` reports POLLOUT immediately, so the
+    drive completes in at most four ticks (DNS, dial, poll-ready
+    [+ TLS promote]).  Raises AssertionError if the connector fails —
+    the stub substrate never legitimately fails.
+    """
+    mp_connector = mp_adapter.connector(host, port, tls=tls, context=context)
+    for _ in range(6):
+        if mp_connector.state in ("ready", "failed"):
+            break
+        mp_connector.tick(0)
+    assert mp_connector.state == "ready", (
+        f"stub-driven connector ended {mp_connector.state!r} "
+        f"(last_error={mp_connector.last_error!r})"
+    )
+    return mp_connector.socket
+
+
+class TestConnectorTcp:
     def test_connects_via_getaddrinfo(self, mp_adapter: types.ModuleType) -> None:
-        wrapper = mp_adapter.connect_tcp("broker.example.com", 1883)
-        # The factory returns a _MpSocketWrapper around the raw stub.
-        underlying = wrapper._sock  # type: ignore[attr-defined]
+        wrapper = _connect(mp_adapter, "broker.example.com", 1883)
+        # The ready connector holds a _MpSocketWrapper around the raw stub.
+        underlying = wrapper.sock
         assert underlying.connected_to == ("broker.example.com", 1883)
         assert underlying.family == 2
         assert underlying.kind == 1
 
-    def test_recv_into_polyfilled_via_recv(
+    def test_recv_into_forwards_to_readinto(
         self, mp_adapter: types.ModuleType,
     ) -> None:
-        """MP rp2/esp32 stream sockets expose recv() but NOT recv_into.
+        """MP rp2/esp32 lwIP sockets expose stream ``readinto`` but NOT recv_into.
 
-        Live-board acceptance run on Lolin S2 MP + Pi Pico W MP confirmed
-        ``AttributeError("'socket' object has no attribute 'recv_into'")``;
-        the wrapper polyfills it.  This test pins the polyfill in place
-        on every refactor.
+        A bare ``sock.recv_into(buffer, n)`` raises
+        ``AttributeError("'socket' object has no attribute 'recv_into'")``
+        on the real MP boards; the wrapper forwards to
+        ``readinto(buffer, size)`` — zero-copy, no per-receive ``bytes``.
+        This test pins the forward in place on every refactor.
         """
-        wrapper = mp_adapter.connect_tcp("broker.example.com", 1883)
-        underlying = wrapper._sock  # type: ignore[attr-defined]
+        wrapper = _connect(mp_adapter, "broker.example.com", 1883)
+        underlying = wrapper.sock
         underlying.recv_queue.append(b"hello world")
         buffer = bytearray(32)
         nbytes_read = wrapper.recv_into(buffer, 32)
@@ -171,8 +242,8 @@ class TestConnectTcp:
     def test_recv_into_default_uses_buffer_length(
         self, mp_adapter: types.ModuleType,
     ) -> None:
-        wrapper = mp_adapter.connect_tcp("broker.example.com", 1883)
-        underlying = wrapper._sock  # type: ignore[attr-defined]
+        wrapper = _connect(mp_adapter, "broker.example.com", 1883)
+        underlying = wrapper.sock
         underlying.recv_queue.append(b"abc")
         buffer = bytearray(4)
         nbytes_read = wrapper.recv_into(buffer, 0)
@@ -182,66 +253,67 @@ class TestConnectTcp:
     def test_recv_into_zero_on_clean_close(
         self, mp_adapter: types.ModuleType,
     ) -> None:
-        """Empty bytes from MP recv() means clean peer close — return 0."""
-        wrapper = mp_adapter.connect_tcp("broker.example.com", 1883)
-        # No queued data + recv() returns b"" by stub default.
+        """Empty queue -> readinto returns 0, signalling a clean peer close."""
+        wrapper = _connect(mp_adapter, "broker.example.com", 1883)
+        # No queued data + readinto returns 0 by stub default.
         buffer = bytearray(8)
         nbytes_read = wrapper.recv_into(buffer, 8)
         assert nbytes_read == 0
 
-    def test_recv_into_raises_eagain_when_recv_returns_none(
+    def test_recv_into_raises_eagain_when_readinto_returns_none(
         self, mp_adapter: types.ModuleType,
     ) -> None:
-        """MP TLS ``SSLSocket.recv()`` returns ``None`` for WANT_READ.
+        """MP non-blocking ``readinto`` returns ``None`` when it would block.
 
-        The wrapper raises ``OSError(11)`` (EAGAIN) so callers see
+        The wrapper raises ``OSError(errno.EAGAIN)`` so callers see
         the same "no data this tick" contract as plain TCP.  Without
-        this, downstream protocols (chumicro-requests, chumicro-mqtt)
-        can't distinguish "no data yet" from "peer closed mid-response"
-        on MP TLS — surfaced live during chumicro-requests slice 3c
-        verification on Pi Pico W RP2.
+        this, a length-known read cannot tell "no data yet" from
+        "peer closed mid-response".
         """
         import pytest  # noqa: PLC0415
 
-        wrapper = mp_adapter.connect_tcp("broker.example.com", 1883)
-        underlying = wrapper._sock  # type: ignore[attr-defined]
-        underlying.recv = lambda _size: None  # MP TLS WANT_READ shape
+        wrapper = _connect(mp_adapter, "broker.example.com", 1883)
+        underlying = wrapper.sock
+        underlying.readinto = lambda *_args: None  # would-block shape
         buffer = bytearray(8)
         with pytest.raises(OSError) as captured:
             wrapper.recv_into(buffer, 8)
-        assert captured.value.args[0] == 11
+        assert captured.value.args[0] == errno.EAGAIN
 
-    def test_send_close_setblocking_settimeout_fileno_forward(
+    def test_send_close_setblocking_settimeout_forward(
         self, mp_adapter: types.ModuleType,
     ) -> None:
         """All other protocol methods are direct attribute forwards."""
-        wrapper = mp_adapter.connect_tcp("broker.example.com", 1883)
-        underlying = wrapper._sock  # type: ignore[attr-defined]
+        wrapper = _connect(mp_adapter, "broker.example.com", 1883)
+        underlying = wrapper.sock
         wrapper.send(b"ping")
         assert bytes(underlying.sent) == b"ping"
         wrapper.setblocking(False)
         assert underlying._blocking is False
         wrapper.settimeout(2.5)
         assert underlying._timeout == 2.5
-        assert wrapper.fileno() == 7
         wrapper.close()
         assert underlying._closed is True
 
     def test_missing_settimeout_falls_back_to_noop(
         self, mp_adapter: types.ModuleType,
     ) -> None:
-        """Some MP SSLSocket impls drop settimeout — wrapper must not trip.
+        """Missing ``settimeout`` on an MP SSLSocket falls back to a no-op.
 
-        Live-board acceptance on Lolin S2 ESP32 surfaced
-        AttributeError("'SSLSocket' object has no attribute 'settimeout'");
-        the wrapper falls back to a no-op stub.  This test pins that
-        in place so future refactors can't reintroduce the hard error.
+        mbedTLS SSLSocket on the supported MP ports exposes ``send`` /
+        ``recv`` / ``close`` / ``setblocking`` but does NOT expose
+        ``settimeout`` (verified in MP's ``extmod/modtls_mbedtls.c``
+        locals dict).  A bare ``sock.settimeout(2.5)`` raises
+        ``AttributeError("'SSLSocket' object has no attribute
+        'settimeout'")``.  The wrapper falls back to a no-op stub;
+        this test pins that fallback in place.
         """
 
         class _SSLishSocket:
             def __init__(self) -> None:
                 self.sent: bytearray = bytearray()
                 self._closed: bool = False
+                self._blocking: bool = True
 
             def send(self, data: bytes) -> int:
                 self.sent.extend(data)
@@ -252,14 +324,18 @@ class TestConnectTcp:
 
             def close(self) -> None:
                 self._closed = True
-            # No setblocking, no settimeout, no fileno — like the live
-            # MP SSLSocket on the supported boards.
 
-        wrapper = mp_adapter._MpSocketWrapper(_SSLishSocket())
-        # No-ops succeed silently.
+            def setblocking(self, flag: bool) -> None:
+                self._blocking = flag
+            # No settimeout — like the live MP SSLSocket on the
+            # supported boards.
+
+        underlying = _SSLishSocket()
+        wrapper = mp_adapter._MpSocketWrapper(underlying)
         wrapper.setblocking(False)
+        assert underlying._blocking is False
+        # settimeout no-ops silently against the missing-method fallback.
         wrapper.settimeout(2.5)
-        assert wrapper.fileno() == -1  # "no real fd" sentinel
         wrapper.send(b"hi")
         wrapper.close()
 
@@ -283,39 +359,39 @@ class TestCaBundleLoader:
         assert len(der) > 4000  # 17-root bundle is ~16 KB
 
 
-class TestConnectTls:
+class TestConnectorTls:
     def test_default_uses_cached_default_context(
         self, mp_adapter: types.ModuleType,
     ) -> None:
         """``context=None`` builds (and caches) a default SSLContext
         from the shipped CA bundle.
 
-        Shape Y: the older MP idiom of calling the module-level
+        The adapter lazily builds an SSLContext from the shipped
+        ``_ca_bundle.read_der()`` DER and reuses it across every
+        default-context connection.  The older module-level
         ``ssl.wrap_socket`` (which left ``verify_mode = CERT_NONE``)
-        is gone — the adapter now lazily builds an SSLContext from the
-        shipped ``_ca_bundle.read_der()`` DER and reuses it across
-        every default-context connection.
+        is no longer called from this path.
         """
-        wrapper = mp_adapter.connect_tls("broker.example.com", 8883)
+        wrapper = _connect(mp_adapter, "broker.example.com", 8883, tls=True)
         cached = mp_adapter._DEFAULT_CONTEXT_CACHE
         assert cached is not None, "default context should be cached"
         assert len(cached.wrapped) == 1
         wrapped_sock, server_hostname = cached.wrapped[0]
-        underlying = wrapper._sock  # type: ignore[attr-defined]
+        underlying = wrapper.sock
         assert wrapped_sock is underlying
         assert server_hostname == "broker.example.com"
         assert underlying.connected_to == ("broker.example.com", 8883)
         # Free-form ssl.wrap_socket must not be called — it leaves
-        # verify_mode=CERT_NONE on MP and is the bug Shape Y fixes.
+        # verify_mode=CERT_NONE on MP.
         assert sys.modules["ssl"]._free_wrap_calls == []  # type: ignore[attr-defined]
 
     def test_default_context_reused_across_calls(
         self, mp_adapter: types.ModuleType,
     ) -> None:
         """Two ``context=None`` connections share the same cached SSLContext."""
-        mp_adapter.connect_tls("a.example.com", 8883)
+        _connect(mp_adapter, "a.example.com", 8883, tls=True)
         first_cached = mp_adapter._DEFAULT_CONTEXT_CACHE
-        mp_adapter.connect_tls("b.example.com", 8883)
+        _connect(mp_adapter, "b.example.com", 8883, tls=True)
         second_cached = mp_adapter._DEFAULT_CONTEXT_CACHE
         assert first_cached is second_cached
         # Both connections recorded on the same context.
@@ -327,10 +403,10 @@ class TestConnectTls:
         """A pre-built SSLContext routes through `context.wrap_socket`."""
         stub_ssl = sys.modules["ssl"]
         context = stub_ssl._StubContext()  # type: ignore[attr-defined]
-        wrapper = mp_adapter.connect_tls(
-            "broker.example.com", 8883, context=context,
+        wrapper = _connect(
+            mp_adapter, "broker.example.com", 8883, tls=True, context=context,
         )
-        underlying = wrapper._sock  # type: ignore[attr-defined]
+        underlying = wrapper.sock
         assert len(context.wrapped) == 1
         wrapped_sock, server_hostname = context.wrapped[0]
         assert wrapped_sock is underlying
@@ -350,7 +426,7 @@ class TestSetDefaultCaBundle:
         rebuilds from the new bundle."""
         # First connection — caches a context built from the shipped
         # DER bundle (_ca_bundle.read_der()).
-        mp_adapter.connect_tls("a.example.com", 8883)
+        _connect(mp_adapter, "a.example.com", 8883, tls=True)
         first_cached = mp_adapter._DEFAULT_CONTEXT_CACHE
         assert first_cached is not None
 
@@ -366,7 +442,7 @@ class TestSetDefaultCaBundle:
         assert mp_adapter._DEFAULT_CONTEXT_CACHE is None
 
         # Next default-context call rebuilds.
-        mp_adapter.connect_tls("b.example.com", 8883)
+        _connect(mp_adapter, "b.example.com", 8883, tls=True)
         second_cached = mp_adapter._DEFAULT_CONTEXT_CACHE
         assert second_cached is not None
         assert second_cached is not first_cached
@@ -387,7 +463,7 @@ class TestSetDefaultCaBundle:
         )
         mp_adapter.set_default_ca_bundle(override_pem)
         # Build cache from override.
-        mp_adapter.connect_tls("a.example.com", 8883)
+        _connect(mp_adapter, "a.example.com", 8883, tls=True)
         override_cached = mp_adapter._DEFAULT_CONTEXT_CACHE
         assert override_cached.cadata == b"\xde\xad\xbe\xef"
 
@@ -397,7 +473,7 @@ class TestSetDefaultCaBundle:
         assert mp_adapter._DEFAULT_CONTEXT_CACHE is None
 
         # Next call rebuilds from the packaged DER bundle.
-        mp_adapter.connect_tls("b.example.com", 8883)
+        _connect(mp_adapter, "b.example.com", 8883, tls=True)
         reverted_cached = mp_adapter._DEFAULT_CONTEXT_CACHE
         assert reverted_cached is not override_cached
         # Packaged bundle's DER differs from the test override.
@@ -433,7 +509,7 @@ class TestSslContextWithCa:
         conversion behavior.
         """
         # Real-shape PEM: header / body / footer with valid base64 body.
-        # ``b"\xde\xad\xbe\xef"`` → ``b"3q2+7w=="`` after base64.
+        # ``b"\xde\xad\xbe\xef"`` encodes to ``b"3q2+7w=="`` in base64.
         ca_pem = (
             b"-----BEGIN CERTIFICATE-----\n"
             b"3q2+7w==\n"

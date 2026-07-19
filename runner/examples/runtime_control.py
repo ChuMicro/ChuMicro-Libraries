@@ -1,14 +1,14 @@
-"""Runtime task control — advanced ecosystem patterns.
+"""Runtime task control: advanced ecosystem patterns.
 
 Demonstrates how the runner and timing libraries work together:
 
 - Adjusting task periods at runtime via ``TaskHandle``
 - Removing tasks dynamically
-- Using ``Heartbeat`` alongside ``Runner`` for custom timing
+- Using ``Rate`` alongside ``Runner`` for custom timing
   logic that lives outside the runner
 - Using the runner's ``now_ms`` return value for external decisions
 
-After 10 seconds, the example switches to "fast mode" — logging
+After 10 seconds, the example switches to "fast mode": logging
 speeds up and the Wi-Fi check is removed.
 
 Example output::
@@ -34,7 +34,7 @@ Runs on CPython, MicroPython, and CircuitPython.
 import time
 
 from chumicro_runner import Runner
-from chumicro_timing import Heartbeat
+from chumicro_timing import Rate, ticks_ms
 
 
 def log_data(now_ms: int) -> None:
@@ -61,10 +61,10 @@ runner = Runner()
 log_handle = runner.add_periodic(log_data, period_ms=1000)
 wifi_handle = runner.add_periodic(check_wifi, period_ms=2000)
 
-# A Heartbeat used independently — not managed by the runner.
-# Useful for timing decisions that don't fit the task pattern,
+# Rate used standalone, not registered with the runner.
+# Use it for timing decisions outside the runner's task model,
 # like switching operating modes after a duration.
-mode_timer = Heartbeat(period_ms=10000)
+mode_timer = Rate(10000, ticks_ms())
 
 switched = False
 
@@ -74,8 +74,8 @@ while True:
     # tick() returns the shared timestamp.
     now = runner.tick()
 
-    # Use now_ms with an independent Heartbeat for a timed mode switch.
-    if not switched and mode_timer.poll(now):
+    # Use now_ms with an independent Rate for a timed mode switch.
+    if not switched and mode_timer.due(now):
         print("\n  >> Switching to fast mode: "
               "logging every 250 ms, Wi-Fi removed\n")
         log_handle.set_period(250)

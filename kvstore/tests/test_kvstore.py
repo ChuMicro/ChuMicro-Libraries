@@ -3,7 +3,7 @@
 Cross-runtime compatible: runs under CPython pytest, and under
 MicroPython + CircuitPython unix-ports via ``pytest libraries/kvstore/
 tests --target unix-port`` (the ``chumicro-pytest-device`` plugin's
-unix-port backend).  Only ``MemoryBackend`` is exercised here — the
+unix-port backend).  Only ``MemoryBackend`` is exercised here; the
 per-runtime backends have their own functional-test suites under
 ``functional_tests/``.
 """
@@ -31,7 +31,7 @@ def test_default_backend_is_memory_on_cpython() -> None:
     Runtime-aware: under MP and CP unix-port the auto-detect path
     routes to the per-runtime backends (which are still stubs in this
     slice).  Their selection logic is exercised by the functional
-    suites — assert the CPython case here only.
+    suites. Assert the CPython case here only.
     """
     if sys.implementation.name != "cpython":
         skip("auto-detect on MP/CP unix-port is covered by the functional suites")
@@ -59,18 +59,13 @@ def test_concrete_backend_instance_accepted() -> None:
     assert store.capacity == 512
 
 
-# The string-resolver host-context checks (nvm/nvs/littlefs without the
-# backing hardware) moved to test_kvstore_host.py — they assert
-# off-target behaviour and are excluded from the on-device sweep.
-
-
 # ---------------------------------------------------------------------------
-# Mapping-shaped API
+# Mapping-style API
 # ---------------------------------------------------------------------------
 
 
 def test_set_get_delete() -> None:
-    """Basic dict-shaped read/write/delete cycle."""
+    """Basic dict-style read/write/delete cycle."""
     store = KVStore(backend="memory")
     store["boot_count"] = 1
     assert store["boot_count"] == 1
@@ -186,6 +181,63 @@ def test_commit_if_changed_writes_when_changed() -> None:
     assert store.commit_if_changed() is True
 
 
+def test_commit_if_changed_does_not_encode_when_clean() -> None:
+    """A clean store skips the encode entirely (no allocation on the
+    every-tick no-change path the guide recommends)."""
+    store = KVStore(backend="memory")
+    store["alpha"] = 1
+    store.commit()
+    # Sabotage packb so any encode attempt is loud; a clean store must
+    # not call it.
+    import chumicro_kvstore.core as core_mod
+
+    original = core_mod.packb
+    core_mod.packb = lambda _data: (_ for _ in ()).throw(
+        AssertionError("commit_if_changed encoded a clean store"),
+    )
+    try:
+        assert store.commit_if_changed() is False
+    finally:
+        core_mod.packb = original
+
+
+def test_commit_rejects_undecodable_deep_nesting() -> None:
+    """commit() refuses a value too deeply nested for the decoder, so the
+    store never persists bytes it can't read back on the next load."""
+    store = KVStore(backend="memory")
+    deep = 0
+    for _ in range(9):  # past msgpack _MAX_DEPTH (8)
+        deep = [deep]
+    store["deep"] = deep
+    with raises(ValueError):
+        store.commit()
+
+
+def test_commit_allowed_when_backend_capacity_is_zero_sentinel() -> None:
+    """A custom backend that only implements load/save (leaving the base
+    capacity default 0 = unbounded) accepts commits rather than rejecting
+    even a 1-byte empty-dict payload."""
+    from chumicro_kvstore.core import Backend
+
+    class _MinimalBackend(Backend):
+        name = "minimal"
+
+        def __init__(self):
+            self._payload = b""
+
+        def load(self):
+            return self._payload
+
+        def save(self, payload):
+            self._payload = bytes(payload)
+
+    store = KVStore(backend=_MinimalBackend())
+    assert store.capacity == 0
+    store["k"] = 1
+    store.commit()  # must not raise KVStoreFull from the zero-cap default
+    assert store.commit_if_changed() is False
+
+
 def test_reload_picks_up_external_payload() -> None:
     """Backend payload set externally is visible after ``reload``."""
     backend = MemoryBackend()
@@ -248,11 +300,10 @@ def test_construction_with_corrupt_payload_resets_silently() -> None:
 
 
 def test_reload_raises_on_non_dict_payload() -> None:
-    """``reload`` raises ``KVStoreCorrupt`` on a payload that decodes to a non-dict.
+    """``reload`` raises ``KVStoreCorrupt`` when the payload decodes to a non-dict.
 
-    The construction-time path resets to empty silently; the explicit
-    ``reload`` form is the one callers reach for when they want the
-    exception.
+    Construction-time auto-load resets to empty silently; ``reload``
+    is the explicit form callers use to surface the exception.
     """
     backend = MemoryBackend()
     backend._payload = b"\xc3"  # noqa: SLF001 - msgpack-encoded `True`, decodes to bool
@@ -263,11 +314,7 @@ def test_reload_raises_on_non_dict_payload() -> None:
 
 
 def test_construction_with_truncated_msgpack_resets_silently() -> None:
-    """A power-loss-truncated payload (unpackb raises) is corruption, not a boot crash.
-
-    Guards the ``_load`` contract: construction never raises, even now
-    that ``unpackb`` rejects malformed framing with ``ValueError``.
-    """
+    """A power-loss-truncated payload (unpackb raises) is corruption, not a boot crash."""
     # bin8 claiming 200 bytes, only 2 supplied — unpackb raises ValueError.
     store = KVStore(backend=MemoryBackend(initial=b"\xc4\xc8\x01\x02"))
     assert store.is_corrupt is True
@@ -309,7 +356,7 @@ def test_construction_with_corrupt_backend_load_resets_silently() -> None:
     """``KVStoreCorrupt`` raised during auto-load is caught silently.
 
     Exercises the construction-path branch where the backend itself
-    (not the msgpack decoder) flags corruption — the
+    (not the msgpack decoder) flags corruption. The
     ``MemoryBackend.force_corrupt`` test hook stands in for CP NVM's
     real CRC-mismatch failure mode.
     """

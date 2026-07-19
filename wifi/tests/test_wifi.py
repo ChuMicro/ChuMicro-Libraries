@@ -1,4 +1,4 @@
-"""Tests for ``chumicro_wifi`` — config + state machine + reconnect supervisor.
+"""Tests for ``chumicro_wifi``: config + state machine + reconnect supervisor.
 
 Cross-runtime: runs on CPython pytest, and under MicroPython +
 CircuitPython unix-ports via ``pytest libraries/wifi/tests --target
@@ -29,7 +29,7 @@ _IS_CPYTHON = sys.implementation.name == "cpython"
 
 
 # ---------------------------------------------------------------------------
-# WifiConfig — direct construction + from_config via chumicro-config
+# WifiConfig: direct construction + from_config via chumicro-config
 # ---------------------------------------------------------------------------
 
 
@@ -41,6 +41,7 @@ def test_wifi_config_direct_construction_with_required_only() -> None:
     assert config.hostname is None
     assert config.connect_timeout_ms == 15_000
     assert config.power_save is False
+    assert config.tx_power_dbm is None
 
 
 def test_wifi_config_from_config_required_only_via_dict() -> None:
@@ -55,7 +56,7 @@ def test_wifi_config_from_config_required_only_via_dict() -> None:
 
 
 def test_wifi_config_from_config_via_runtime_config_wrapper() -> None:
-    """Reads through the ``RuntimeConfig`` wrapper too — same semantics."""
+    """Reads through the ``RuntimeConfig`` wrapper too, with the same semantics."""
     runtime = RuntimeConfig(
         {"wifi.ssid": "HomeNet", "wifi.password": "secret"},
     )
@@ -76,6 +77,7 @@ def test_wifi_config_from_config_all_keys() -> None:
             "wifi.reconnect_backoff_max_ms": 30_000,
             "wifi.reconnect_max": 10,
             "wifi.power_save": True,
+            "wifi.tx_power_dbm": 15,
         },
     )
     assert config.hostname == "back-porch"
@@ -83,6 +85,7 @@ def test_wifi_config_from_config_all_keys() -> None:
     assert config.reconnect_backoff_start_ms == 500
     assert config.reconnect_max == 10
     assert config.power_save is True
+    assert config.tx_power_dbm == 15
 
 
 def test_wifi_config_from_config_missing_ssid_raises() -> None:
@@ -121,7 +124,7 @@ def test_wifi_config_try_from_config_returns_config_when_keys_present() -> None:
 
 
 def test_wifi_config_try_from_config_returns_none_when_runtime_config_is_none() -> None:
-    """``runtime_config=None`` → ``None`` (no /runtime_config.msgpack deployed)."""
+    """``runtime_config=None`` returns ``None`` (no /runtime_config.msgpack deployed)."""
     assert WifiConfig.try_from_config(None) is None
 
 
@@ -136,7 +139,7 @@ def test_wifi_config_try_from_config_returns_none_when_required_key_missing() ->
 
 
 # ---------------------------------------------------------------------------
-# WifiState — sentinel constants
+# WifiState: sentinel constants
 # ---------------------------------------------------------------------------
 
 
@@ -150,7 +153,7 @@ def test_wifi_state_constants_are_strings() -> None:
 
 
 # ---------------------------------------------------------------------------
-# WifiService — happy-path state machine via FakeWifiAdapter
+# WifiService: happy-path state machine via FakeWifiAdapter
 # ---------------------------------------------------------------------------
 
 
@@ -194,7 +197,7 @@ def test_connect_succeeds_on_first_attempt() -> None:
 
 
 def test_check_returns_false_when_connected_and_link_up() -> None:
-    """A linked connection is steady-state — no work for the runner."""
+    """A linked connection is steady-state, with no work for the runner."""
     service, ticks, adapter = _service()
     adapter.set_connect_outcome(True)
     service.handle(ticks.ticks_ms())
@@ -225,7 +228,7 @@ def test_reconnect_backs_off_then_succeeds() -> None:
     service.handle(ticks.ticks_ms())  # detect drop, schedule reconnect
     assert service.state == WifiState.RECONNECTING
 
-    # First reconnect attempt (False) — schedules backoff.
+    # First reconnect attempt (False), schedules backoff.
     service.handle(ticks.ticks_ms())
     assert service.state == WifiState.RECONNECTING
 
@@ -234,19 +237,19 @@ def test_reconnect_backs_off_then_succeeds() -> None:
     service.handle(ticks.ticks_ms())
     assert service.state == WifiState.RECONNECTING
 
-    # Advance past doubled backoff, third attempt (True) — back to CONNECTED.
+    # Advance past doubled backoff, third attempt (True), back to CONNECTED.
     ticks.advance(50)
     service.handle(ticks.ticks_ms())
     assert service.state == WifiState.CONNECTED
 
 
 # ---------------------------------------------------------------------------
-# WifiService — failure paths
+# WifiService: failure paths
 # ---------------------------------------------------------------------------
 
 
 def test_adapter_exception_stored_in_last_error() -> None:
-    """Adapter exceptions don't propagate; surface via ``last_error``."""
+    """Adapter exceptions don't propagate.  They surface via ``last_error``."""
 
     class _BoomError(Exception):
         pass
@@ -254,7 +257,7 @@ def test_adapter_exception_stored_in_last_error() -> None:
     service, ticks, adapter = _service()
     adapter.set_connect_outcome(_BoomError)
     service.handle(ticks.ticks_ms())
-    # Connect raised → state stays CONNECTING, error stored.
+    # Connect raised: state stays CONNECTING, error stored.
     assert isinstance(service.last_error, _BoomError)
     assert service.state == WifiState.CONNECTING
 
@@ -289,8 +292,8 @@ def test_failed_state_does_not_self_recover() -> None:
 def test_check_handles_too_early_handle_call_idempotently() -> None:
     """Calling ``handle`` before ``check`` is true is a no-op."""
     service, ticks, _ = _service()
-    # In DISCONNECTED, check is true immediately (next_attempt_due_ms == now);
-    # but right after a failed attempt, check is false.  Verify handle does
+    # In DISCONNECTED, check is true immediately (next_attempt_due_ms == now).
+    # But right after a failed attempt, check is false.  Verify handle does
     # nothing if invoked between scheduled attempts.
     service._next_attempt_due_ms = ticks.ticks_ms() + 1_000_000  # noqa: SLF001
     service.state = WifiState.RECONNECTING
@@ -299,7 +302,7 @@ def test_check_handles_too_early_handle_call_idempotently() -> None:
 
 
 # ---------------------------------------------------------------------------
-# WifiService — backoff math
+# WifiService: backoff math
 # ---------------------------------------------------------------------------
 
 
@@ -313,27 +316,27 @@ def test_backoff_doubles_until_max() -> None:
     )
     adapter.set_connect_outcome(False)
 
-    # First failed attempt — backoff is the start value.
+    # First failed attempt, backoff is the start value.
     start = ticks.ticks_ms()
     service.handle(start)
     assert service._next_attempt_due_ms == start + 10  # noqa: SLF001
 
-    # Second attempt — backoff doubled to 20.
+    # Second attempt, backoff doubled to 20.
     ticks.advance(20)
     service.handle(ticks.ticks_ms())
     assert service._next_attempt_due_ms == ticks.ticks_ms() + 20  # noqa: SLF001
 
-    # Third attempt — doubled to 40.
+    # Third attempt, doubled to 40.
     ticks.advance(40)
     service.handle(ticks.ticks_ms())
     assert service._next_attempt_due_ms == ticks.ticks_ms() + 40  # noqa: SLF001
 
-    # Fourth attempt — capped at 80.
+    # Fourth attempt, capped at 80.
     ticks.advance(80)
     service.handle(ticks.ticks_ms())
     assert service._next_attempt_due_ms == ticks.ticks_ms() + 80  # noqa: SLF001
 
-    # Fifth attempt — still capped at 80.
+    # Fifth attempt, still capped at 80.
     ticks.advance(80)
     service.handle(ticks.ticks_ms())
     assert service._next_attempt_due_ms == ticks.ticks_ms() + 80  # noqa: SLF001
@@ -351,16 +354,16 @@ def test_successful_connect_resets_backoff() -> None:
 
     service.handle(ticks.ticks_ms())  # fail 1
     ticks.advance(20)
-    service.handle(ticks.ticks_ms())  # fail 2 — backoff at 20
+    service.handle(ticks.ticks_ms())  # fail 2, backoff at 20
     ticks.advance(40)
-    service.handle(ticks.ticks_ms())  # success — resets
+    service.handle(ticks.ticks_ms())  # success, resets
 
     assert service._current_backoff_ms == 10  # noqa: SLF001
     assert service.state == WifiState.CONNECTED
 
 
 # ---------------------------------------------------------------------------
-# WifiService — state-change callback
+# WifiService: state-change callback
 # ---------------------------------------------------------------------------
 
 
@@ -401,7 +404,7 @@ def test_no_callback_for_no_op_transition() -> None:
 
 
 # ---------------------------------------------------------------------------
-# WifiService — adapter selection + auto-detect
+# WifiService: adapter selection + auto-detect
 # ---------------------------------------------------------------------------
 
 
@@ -414,9 +417,9 @@ def test_adapter_name_field_reflects_injected_adapter() -> None:
 def test_default_adapter_on_cpython_is_fake() -> None:
     """``_select_adapter`` returns ``FakeWifiAdapter`` on CPython.
 
-    The CP and MP adapters are now real and exercised by the
-    functional suites; this host-side test stays scoped to the
-    CPython fake-adapter path.
+    The CP and MP adapters are exercised by the functional suites.
+    This host-side test stays scoped to the CPython fake-adapter
+    path.
     """
     if not _IS_CPYTHON:
         skip("CP/MP adapter selection is covered by the functional suites")
@@ -448,7 +451,7 @@ def test_unknown_attr_raises_attribute_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# FakeWifi (testing.py) — wrapper ergonomics for downstream library tests
+# FakeWifi (testing.py): wrapper ergonomics for downstream library tests
 # ---------------------------------------------------------------------------
 
 
@@ -516,17 +519,17 @@ def test_fake_wifi_accepts_custom_config() -> None:
 
 
 # ---------------------------------------------------------------------------
-# FakeWifiAdapter — direct adapter contract
+# FakeWifiAdapter: direct adapter contract
 # ---------------------------------------------------------------------------
 
 
-def test_fake_adapter_disconnect_clears_link() -> None:
-    """Explicit disconnect drops the linked flag."""
+def test_fake_adapter_drop_link_clears_link() -> None:
+    """A simulated link-down drops the linked flag and clears the IP."""
     adapter = FakeWifiAdapter()
     config = WifiConfig(ssid="x", password="y")
     adapter.connect(config)
     assert adapter.is_linked() is True
-    adapter.disconnect()
+    adapter.drop_link()
     assert adapter.is_linked() is False
     assert adapter.ip() is None
 
@@ -546,18 +549,17 @@ def test_fake_adapter_records_every_call() -> None:
     config = WifiConfig(ssid="x", password="y")
     adapter.configure(config)
     adapter.connect(config)
-    adapter.disconnect()
     names = [entry[0] for entry in adapter.calls]
-    assert names == ["configure", "connect", "disconnect"]
+    assert names == ["configure", "connect"]
 
 
 # ---------------------------------------------------------------------------
-# Adapter base class — abstract methods raise
+# Adapter base class: abstract methods raise
 # ---------------------------------------------------------------------------
 
 
 def test_base_adapter_methods_raise_notimplementederror() -> None:
-    """Concrete adapters must override every method; defaults raise loudly."""
+    """Concrete adapters must override every method.  Defaults raise loudly."""
     from chumicro_wifi._adapters.base import WifiAdapter
     adapter = WifiAdapter()
     config = WifiConfig(ssid="x", password="y")
@@ -565,8 +567,6 @@ def test_base_adapter_methods_raise_notimplementederror() -> None:
         adapter.configure(config)
     with raises(NotImplementedError):
         adapter.connect(config)
-    with raises(NotImplementedError):
-        adapter.disconnect()
     with raises(NotImplementedError):
         adapter.is_linked()
     with raises(NotImplementedError):

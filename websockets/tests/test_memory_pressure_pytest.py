@@ -26,13 +26,14 @@ contract (``handle`` returns quickly) keeps that decision in the
 user's hands.
 """
 
-#: CPython-only lane (pytest fixtures / host stdlib); not cross-runtime.
+#: CPython-only lane (pytest fixtures / host stdlib).  Not cross-runtime.
 __chumicro_runtimes__ = ("cpython",)
 
 import gc
 import struct
 import tracemalloc
 
+from chumicro_sockets.testing import FakeSocketConnector
 from chumicro_timing.testing import FakeTicks
 from chumicro_websockets import (
     OPCODE_BINARY,
@@ -52,7 +53,9 @@ from chumicro_websockets.testing import FakeConnection, FakeListener
 
 def _make_client(socket: FakeConnection, clock: FakeTicks) -> WebSocketClient:
     return WebSocketClient(
-        connection_factory=lambda *_args, **_kwargs: socket,
+        transport_factory=lambda *_args, **_kwargs: FakeSocketConnector(
+            actions=["dns_ok", "tcp_ok"], socket=socket,
+        ),
         ticks=clock,
     )
 
@@ -132,7 +135,7 @@ def _client_outbound_unmask(framed: bytes) -> tuple[int, bytes]:
 
 
 # ---------------------------------------------------------------------------
-# send_text — the hottest outbound path
+# send_text: the hottest outbound path
 # ---------------------------------------------------------------------------
 
 
@@ -164,7 +167,7 @@ class TestSendTextNoLeak:
 
 
 # ---------------------------------------------------------------------------
-# send_binary — same path, larger payload
+# send_binary: same path, larger payload
 # ---------------------------------------------------------------------------
 
 
@@ -192,7 +195,7 @@ class TestSendBinaryNoLeak:
 
 
 # ---------------------------------------------------------------------------
-# Inbound text receipt — exercises the framing pipeline
+# Inbound text receipt: exercises the framing pipeline
 # ---------------------------------------------------------------------------
 
 
@@ -209,13 +212,13 @@ class TestInboundTextNoLeak:
         clock = FakeTicks()
         client = _make_client(socket, clock)
         _drive_client_to_open(client, socket, clock)
-        # Sink for the inbound text — drop reference immediately so
+        # Sink for the inbound text: drop reference immediately so
         # the test measures the framing-pipeline's own retention, not
         # the application's accumulation.
         client.on_text = lambda _text: None
 
         # Build a server-to-client frame once (no mask, since servers
-        # MUST NOT mask outbound).  Reuse the same bytes 500x — the
+        # MUST NOT mask outbound).  Reuse the same bytes 500x; the
         # FakeConnection's feed_inbound path makes its own copy via
         # bytearray.extend.
         frame = encode_frame(OPCODE_TEXT, b"21", fin=True, mask=None)
@@ -233,7 +236,7 @@ class TestInboundTextNoLeak:
 
 
 # ---------------------------------------------------------------------------
-# Inbound binary receipt — larger payload + binary callback path
+# Inbound binary receipt: larger payload + binary callback path
 # ---------------------------------------------------------------------------
 
 
@@ -261,7 +264,7 @@ class TestInboundBinaryNoLeak:
 
 
 # ---------------------------------------------------------------------------
-# PING / PONG round-trip — control-frame path
+# PING / PONG round-trip: control-frame path
 # ---------------------------------------------------------------------------
 
 
@@ -307,10 +310,8 @@ class TestRecvBufferReuse:
     def test_recv_buffer_id_stable(self) -> None:
         """The session's recv scratch buffer is allocated once + reused.
 
-        Pulls 100 small inbound frames through; the underlying
-        bytearray's id() must be stable.  Regression guard for the
-        slice-G refactor (the recv_buffer pre-allocation lives on
-        ``_BaseSession`` now).
+        Pulls 100 small inbound frames through.  The underlying
+        bytearray's id() must be stable.
         """
         socket = FakeConnection()
         clock = FakeTicks()
@@ -330,9 +331,10 @@ class TestRecvBufferReuse:
     def test_frame_parser_state_resets_cleanly(self) -> None:
         """The FrameParser's internal write cursors reset between frames.
 
-        After parsing N frames the FrameParser's own ``_buffer`` is
-        empty and the steady-state ``_payload`` is reused but its
-        write cursor is back to zero — no across-frame retention.
+        After parsing N frames the FrameParser's header-field write
+        cursor (``_header_len``) is back to zero and the steady-state
+        ``_payload`` is reused but its write cursor is back to zero —
+        no across-frame retention.
         """
         socket = FakeConnection()
         clock = FakeTicks()
@@ -345,19 +347,20 @@ class TestRecvBufferReuse:
             socket.feed_inbound(frame)
             client.handle(clock.ticks_ms())
 
-        # Frame parser should be in READING_HEADER with the buffer
-        # empty; the steady-state payload buffer is reused (len stays
-        # at the buffer capacity) but the logical write cursor is 0.
+        # Frame parser should be in READING_HEADER with the header-field
+        # write cursor at 0.  The steady-state payload buffer is reused
+        # (len stays at the buffer capacity) but the logical write
+        # cursor is 0.
         from chumicro_websockets._wire import FrameParseState
         parser = client._frame_parser
         assert parser.state == FrameParseState.READING_HEADER
-        assert len(parser._buffer) == 0
+        assert parser._header_len == 0
         assert parser._payload is parser._payload_buffer
         assert parser._payload_write_offset == 0
 
 
 # ---------------------------------------------------------------------------
-# Bounded recv loop — handle() returns promptly with no inbound
+# Bounded recv loop: handle() returns promptly with no inbound
 # ---------------------------------------------------------------------------
 
 
@@ -387,7 +390,7 @@ class TestHandleBoundedWork:
 
 
 # ---------------------------------------------------------------------------
-# Server-side Connection — same patterns mirrored
+# Server-side Connection: same patterns mirrored
 # ---------------------------------------------------------------------------
 
 
