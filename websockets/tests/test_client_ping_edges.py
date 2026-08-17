@@ -112,9 +112,9 @@ class TestClientEdges:
         client.connect("ws://example.com/")
         _drive_handshake(client, socket, clock)
         client.send_text("hello world")
-        # First tick partially sends.  client._tx_partial is now non-None.
+        # First tick partially sends.  client._tx_partial_buffer is now non-None.
         client.handle(clock.ticks_ms())
-        assert client._tx_partial is not None
+        assert client._tx_partial_buffer is not None
         assert client.check(clock.ticks_ms()) is True
 
     def test_drain_outbound_eagain_keeps_open(self):
@@ -126,7 +126,7 @@ class TestClientEdges:
         client.handle(clock.ticks_ms())
         assert client.state == WebSocketState.OPEN
         # Frame still queued.
-        assert client._tx_queue or client._tx_partial is not None
+        assert client._tx_queue or client._tx_partial_buffer is not None
 
     def test_drain_outbound_send_returns_zero(self):
         client, socket, clock, _ = _make_client()
@@ -292,3 +292,25 @@ class TestClientFromConfig:
 
         assert captured == {"radio": "fake-radio", "ssl_context": "fake-ctx"}
         assert client._transport_factory is sentinel_factory  # noqa: SLF001
+
+
+class TestClientFromConfigPassthrough:
+    """Constructor knobs with no manifest key ride ``from_config`` as
+    keywords, and an explicit keyword wins over its config-derived
+    value."""
+
+    def test_tuning_kwarg_reaches_constructor(self) -> None:
+        factory = lambda host, port, use_tls: FakeSocket()  # noqa: ARG005,E731
+        client = WebSocketClient.from_config(
+            {}, transport_factory=factory, ping_interval_ms=1_500,
+        )
+        assert client._ping_interval_ms == 1_500  # noqa: SLF001
+
+    def test_explicit_kwarg_wins_over_config(self) -> None:
+        factory = lambda host, port, use_tls: FakeSocket()  # noqa: ARG005,E731
+        client = WebSocketClient.from_config(
+            {"websockets.client.max_message_bytes": 4096},
+            transport_factory=factory,
+            max_message_bytes=512,
+        )
+        assert client._max_message_bytes == 512  # noqa: SLF001

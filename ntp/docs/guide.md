@@ -25,7 +25,7 @@ A few notes on dependencies:
 
 - `chumicro-sockets` is a hard dependency: `pip install chumicro-ntp` brings the whole stack.
 - `NTPClient.from_config` builds the default UDP wiring through the shared `chumicro_sockets.sockets_factory` module, imported lazily.  Apps that supply their own UDP socket never trigger that import, so `chumicro-sockets` doesn't get deployed to the device for those apps.
-- No `chumicro-logging` dep.  The library exposes no callbacks: the result handle returned by `query()` is the observation surface.
+- No logging dependency.  The library exposes no callbacks: the result handle returned by `query()` is the observation surface.
 
 ## Getting started
 
@@ -54,8 +54,11 @@ sock.close()
 ```
 
 `request.unix_seconds` is the server's transmit-timestamp converted
-to Unix-epoch seconds.  Feed it into `time.gmtime` (CPython) /
-`utime.localtime` (MP/CP) for date components.
+to Unix-epoch seconds.  Feed it into `time.gmtime` (CPython) for date
+components.  On MicroPython and CircuitPython check the port's epoch
+first: rp2 and CircuitPython use 1970, but MicroPython's esp32 port
+counts from 2000, so `time.localtime(unix_seconds - 946_684_800)`
+is the correct call there (946,684,800 is the 1970-to-2000 offset).
 
 ## Bring your own transport
 
@@ -111,7 +114,7 @@ from chumicro_runner import Runner
 runner = Runner()
 runner.add(client)        # check/handle wired up by the runner
 # inside your tick loop:
-runner.tick(now_ms())
+now_ms = runner.tick()
 if request.done:
     use(request.unix_seconds)
 ```
@@ -146,13 +149,19 @@ Tested on real CircuitPython and MicroPython boards with live `pool.ntp.org` que
 | `sendto` failed (kernel rejected, address invalid) | `OSError` (raw, not wrapped) |
 | Recv timeout (`timeout_ms` elapsed without data) | `NTPError("SNTP query timed out after N ms")` |
 | Short response (< 48 bytes) | `NTPError("short SNTP response (N bytes)")` |
-| Wrong mode in the response | `NTPError("unexpected SNTP mode N")` |
+| Wrong mode in the response | `NTPError("unexpected SNTP mode N (want 4)")` |
 | Stratum-0 kiss-of-death | `NTPError("SNTP kiss-of-death (stratum=0)")` |
+| Zero transmit timestamp | `NTPError("SNTP zero transmit timestamp")` |
 | Canceled via `client.cancel()` | `NTPError("canceled")` |
 | Socket recv failed (non-EAGAIN OSError) | `OSError` (raw, not wrapped) |
 
 `NTPError` is an `OSError` subclass so handlers that do
 `except OSError` catch both wrapped and unwrapped failures.
+
+One thing the client does not check: the datagram's sender.  Any host
+that lands 48 well-formed bytes on the ephemeral port before the real
+server replies can set the result.  SNTP over UDP is spoofable by
+design; treat the result as advisory time, not authenticated time.
 
 ## Examples
 

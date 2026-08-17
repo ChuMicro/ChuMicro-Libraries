@@ -90,9 +90,13 @@ while True:
 The method returns `now_ms` so user code can use it alongside the service loop:
 
 ```python
+from chumicro_timing import Rate, ticks_ms
+
+rate = Rate(500, ticks_ms())
+
 while True:
     now = runner.tick()
-    if some_heartbeat.poll(now):
+    if rate.due(now):
         do_something()
     runner.wait(now)
 ```
@@ -180,13 +184,13 @@ A service is any object you hand to `runner.add(service)`.  The runner reads six
 | `next_deadline(now_ms) -> int \| None` | no | each `wait` | bounding the idle timeout so the service still runs on time with no I/O |
 | `io_error(now_ms, eventmask)` | no | on `wait`, when `io_socket` reports `POLLERR` / `POLLHUP` | transitioning cleanly to a failure state |
 
-The coherence rules, as the dispatch enforces them:
+The coherence rules.  Only the first raises on its own (`Runner.add` reads both attributes at registration); the dispatch silently depends on the other two, where a violation no-ops rather than raising, which is what `validate_service` below exists to catch:
 
 - **`check` and `handle` are both required.**  `Runner.add` reads both off the object at registration, so a service missing either cannot register.
 - **`io_socket` and `io_interest` come as a pair.**  The poll sync reaches the socket through `io_interest`; one member without the other never reaches the poller.
 - **`io_error` requires `io_socket`.**  It is dispatched only when that socket reports a poll error.
 
-`chumicro_runner.testing.validate_service(service)` checks exactly these rules and raises `ValueError` naming the offending member.  It validates shape, never behavior, so drop it into a consumer library's test suite to catch a malformed service before it reaches a live runner:
+`chumicro_runner.testing.validate_service(service)` checks exactly these rules and raises `ValueError` naming the offending member.  It validates shape, never behavior, so drop it into your project's test suite to catch a malformed service before it reaches a live runner:
 
 ```python
 from chumicro_runner.testing import validate_service
@@ -286,6 +290,46 @@ runner.run_until(handle)
 `run_until(handle)` drives the tick/wait loop until the generator finishes, and re-raises `handle.error` if the task died, so a broken flow fails loudly instead of exiting clean.  Pass a callable instead for arbitrary conditions, or just `timeout_ms=` to run for a fixed window (a QoS-ack drain, a settling period).
 
 Each `yield from` is a scheduler checkpoint; between yields, other services registered on the same runner get their turn.  A bare `yield` suspends for exactly one tick.  `handle.done` flips True the moment the generator returns, dies, or is cancelled; `handle.error` holds the exception when the body raised (`None` otherwise), so a `while not handle.done` loop can report *why* a task ended: check it after the loop, or wire `Runner(on_handler_error=...)` for a loud callback at the moment of death.  `handle.cancel()` raises `GeneratorExit` inside the body so any `finally` block runs the cleanup.
+
+#### What a generator yields, and driving one without the runner
+
+A suspended generator yields a **wait**: a small object describing why it stopped.  Waits are duck-typed and every hook is optional:
+
+| Hook | Meaning | Who reads it |
+|---|---|---|
+| `ready(now_ms) -> bool` | The wait judges its own condition, with no clock involved | any driver |
+| `next_deadline(now_ms)` | Resume once this tick lands | any driver, and `Runner.wait()` to bound its idle timeout |
+| `io_socket` + `io_interest(now_ms)` | Resume when this socket is readable or writable | `Runner.wait()`, to sleep on `ipoll` |
+
+No wait compares times itself, and that is deliberate: the deadline is published, and whoever drives the generator compares it with the clock it was built on.  A wait that reached for its own clock would measure a `Runner(ticks=...)` sleep in the wrong units.  So the gate is three cases, in order: honour `ready` when it answers `True`, resume once `next_deadline` lands, otherwise resume on any pass.
+
+Socket waits carry no `ready` and no deadline, so they fall to that last case.  Their helpers retry the syscall and re-suspend on `EAGAIN`, which makes an early resume cost a wasted pass and nothing else.
+
+That gate is the whole cost of lifting `chumicro_sockets.generators` into a project with no runner:
+
+```python
+def should_resume(wait, now_ms, ticks):
+    ready = getattr(wait, "ready", None)
+    if ready is not None and ready(now_ms):
+        return True
+    next_deadline = getattr(wait, "next_deadline", None)
+    deadline_ms = None if next_deadline is None else next_deadline(now_ms)
+    if deadline_ms is not None:
+        return ticks.ticks_diff(now_ms, deadline_ms) >= 0   # your clock, your units
+    return ready is None
+
+
+wait = generator.send(None)                 # prime it to the first suspension
+while True:
+    now_ms = ticks.ticks_ms()
+    if should_resume(wait, now_ms, ticks):
+        try:
+            wait = generator.send(now_ms)
+        except StopIteration:
+            break
+```
+
+This spins where `Runner.wait()` would sleep, which costs battery on a device, and it produces identical results.  `tests/test_socket_generators.py` runs a full connect, send, and receive through exactly this loop, and a `sleep_until` through its deadline branch.
 
 #### Waiting on a callback-completed event
 
@@ -418,14 +462,15 @@ tick():
 
 ## Memory notes
 
-- Handlers are collected into a pre-allocated list and batch-fired, avoiding per-tick allocation.
+- Handlers are collected into a reused scratch list that keeps its high-water capacity across ticks, so batch-firing allocates nothing once the list has grown to the working set.
 - No `collections.deque` or ring buffers are required.
 
 ## Testing tasks
 
-The `chumicro_runner.testing` module provides two host-test helpers:
+The `chumicro_runner.testing` module provides three host-test helpers:
 
 - `CallRecorder`: a callable that records handler invocations for assertion in host-side tests.
+- `validate_service`: checks a service object against the coherence rules in [The service contract](#the-service-contract) and raises `ValueError` naming the offending member.
 - `FakePoller`: a stand-in for `select.poll().ipoll` so unit tests can drive `Runner.wait()` without real file descriptors (CPython's `select.poll` needs real fds that in-memory fake sockets do not have).  Records every `register` / `modify` / `unregister` / `ipoll` call so tests can assert on what the runner did with the poll set; `set_ready(obj, eventmask)` queues a ready pair for the next `ipoll` return.
 
 ### `CallRecorder`

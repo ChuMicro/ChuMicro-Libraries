@@ -63,17 +63,20 @@ while client.state != WebSocketState.CLOSED:
 
 ```python
 from chumicro_websockets import WebSocketServer
-from chumicro_sockets import listener as make_listener
+from chumicro_sockets.sockets_factory import listener_factory
 from chumicro_timing import ticks_ms
-from chumicro_wifi import wifi
+from chumicro_wifi import WifiConfig, WifiService
+
+wifi = WifiService(WifiConfig(ssid="home-wifi", password="s3cret"))
 
 def on_connection(connection):
     connection.on_text = lambda text: connection.send_text(f"echo: {text}")
     connection.on_close = lambda code, reason: print(f"client gone: {code}")
 
-listener = make_listener("0.0.0.0", 8765, radio=wifi.adapter.radio)
 server = WebSocketServer(
-    listener=listener,
+    listener_factory=listener_factory(
+        "0.0.0.0", 8765, radio=wifi.adapter.radio,
+    ),
     on_connection=on_connection,
     max_connections=2,
 )
@@ -83,6 +86,8 @@ while True:
     if server.check(now):
         server.handle(now)
 ```
+
+`listener_factory=` defers the bind to the first `handle()` tick, so construction touches no socket.  An already-open listening socket works too: pass it as `listener=` instead (exactly one of the two).
 
 ## Runner pattern
 
@@ -136,9 +141,13 @@ def on_connection(connection):
 
 Same shape as the client's callbacks; semantically identical.
 
+For a broadcast, iterate `server.connections` (a tuple snapshot of the
+live `Connection` objects) and call `send_text` / `send_binary` on each;
+`server.connection_count` is the cheap size check.
+
 ## Bring your own transport
 
-`WebSocketClient` and `WebSocketServer` don't care which library produces their sockets.  The `transport_factory` you pass to the client (and the `listener` you hand to the server) return any object matching the `SocketConnector` contract on the client side or the listener contract on the server side.  The connector advances DNS / TCP / TLS across multiple ticks; once `connector.state == "ready"`, the underlying socket must expose the four-method TCP contract:
+`WebSocketClient` and `WebSocketServer` don't care which library produces their sockets.  The `transport_factory` you pass to the client (and the `listener` or `listener_factory` you hand to the server) return any object matching the `SocketConnector` contract on the client side or the listener contract on the server side.  The connector advances DNS / TCP / TLS across multiple ticks; once `connector.state == "ready"`, the underlying socket must expose the four-method TCP contract:
 
 | Method | Contract |
 |---|---|
@@ -158,7 +167,7 @@ __chumicro_skip_factories__ = ("sockets_factory",)
 
 Family form (`"sockets_factory"`, matches every `chumicro_*.sockets_factory`) or exact path (`"chumicro_sockets.sockets_factory"`).  An unmatched entry fails the deploy with a typo message rather than silently shipping the default.  Calling `WebSocketClient.from_config(...)` when `chumicro_sockets.sockets_factory` is missing (either skipped at deploy time or not installed by `circup` / `mip`) raises `RuntimeError` naming the bypass kwarg.
 
-`chumicro-websockets` adopts cleanly on its own: pass your own `transport_factory` (client) or `listener` (server), set `ticks=` to your clock, drive it from a plain `while` loop instead of `chumicro_runner`, and run host tests through an injected transport with no board attached.
+`chumicro-websockets` adopts cleanly on its own: pass your own `transport_factory` (client) or `listener` / `listener_factory` (server), set `ticks=` to your clock, drive it from a plain `while` loop instead of `chumicro_runner`, and run host tests through an injected transport with no board attached.
 
 ## Memory notes
 
@@ -235,6 +244,7 @@ MCU RAM, 2 MB physical / ~800 KB usable flash):
 |---|---|
 | [`client.py`](https://github.com/ChuMicro/ChuMicro/blob/main/libraries/websockets/examples/client.py) | Wifi-capable board (CP or MP) connecting to a remote `ws://` echo server. |
 | [`server.py`](https://github.com/ChuMicro/ChuMicro/blob/main/libraries/websockets/examples/server.py) | Wifi-capable board (CP or MP) accepting inbound websocket connections. |
+| [`receive_stream.py`](https://github.com/ChuMicro/ChuMicro/blob/main/libraries/websockets/examples/receive_stream.py) | The `next_message` stream surface: a generator drains inbound messages linearly under `runner.add_generator`, with the session ticking alongside. |
 
 ---
 

@@ -13,10 +13,10 @@ Typical wiring, with config loaded from the deployed runtime-config file, the se
 ```python
 from chumicro_config import load_runtime_config
 from chumicro_runner import Runner
-from chumicro_wifi import WifiConfig, WifiService
+from chumicro_wifi import WifiService
 
 config = load_runtime_config()
-wifi = WifiService(WifiConfig.from_config(config))
+wifi = WifiService.from_config(config)
 
 runner = Runner()
 runner.add(wifi)                 # check/handle integration
@@ -28,7 +28,7 @@ while True:
         pass
 ```
 
-`WifiService` calls into the right per-runtime adapter automatically.  No platform branches in your app.
+`WifiService.from_config(config)` reads the flat `wifi.*` keys (the table in [Configuration](#configuration)); any extra keyword (`adapter=`, `ticks=`) passes through to the constructor, and `radio=` hands the CircuitPython adapter a specific radio object.  `WifiService` calls into the right per-runtime adapter automatically.  No platform branches in your app.
 
 ## State machine
 
@@ -36,8 +36,8 @@ while True:
 
 ```
 DISCONNECTED -> CONNECTING -> CONNECTED
-                    |            |
-                    |            v
+                    |            |    ^
+                    |            v    | (link restored)
                     |       RECONNECTING (link dropped)
                     |            |
                     v            v
@@ -101,7 +101,7 @@ def main_run():
 
 ## Configuration
 
-`WifiConfig.from_config(config)` reads the flat `wifi.*` keys from a `RuntimeConfig` (or plain dict with the same shape).  `try_from_config(config)` is the soft variant that returns `None` when the section isn't deployed.  Accepted keys:
+`WifiConfig.from_config(config)` reads the flat `wifi.*` keys from a `RuntimeConfig` (or plain dict with the same shape); `WifiService.from_config(config)` wraps that loader and constructs the service in one call.  `try_from_config(config)` is the soft variant that returns `None` when the section isn't deployed.  Accepted keys:
 
 | Key | Required | Default | Notes |
 |---|---|---|---|
@@ -109,10 +109,11 @@ def main_run():
 | `password` | ✅ | none | WPA passphrase. |
 | `hostname` | | `None` | Hostname advertised on the AP. |
 | `connect_timeout_ms` | | `15_000` | Per-attempt connect deadline: a blocking wait on CircuitPython, the in-flight association poll window on MicroPython. |
+| `first_connect_timeout_ms` | | `None` (use `connect_timeout_ms`) | Allowance for the first connect attempt after construction.  A cold radio's first association after power-up runs longer than a steady-state reconnect; set this above `connect_timeout_ms` so the first attempt can ride it out.  Every later attempt, reconnects included, uses `connect_timeout_ms`. |
 | `reconnect_backoff_start_ms` | | `1_000` | Initial reconnect delay. |
 | `reconnect_backoff_max_ms` | | `60_000` | Exponential-backoff cap. |
 | `reconnect_max` | | `None` (unlimited) | Consecutive failed attempts (initial connect + reconnects) before the terminal `FAILED` state. Leave `None` for always-on devices (see below). |
-| `power_save` | | `False` | Leave radio power-save on.  `False` disables it on Pi Pico W (CYW43); ignored on adapters without the knob. |
+| `power_save` | | `False` | Leave radio power-save on.  `False` disables it on both MicroPython stacks (CYW43 on Pi Pico W, ESP-IDF on esp32); ignored on adapters without the knob (CircuitPython). |
 | `tx_power_dbm` | | `None` (radio default) | Radio transmit power in dBm.  `None` leaves the firmware default untouched; set a reduced value (e.g. `15`) on boards unstable at full power.  Applied via `wifi.radio.tx_power` (CP) / `sta.config(txpower=…)` (MP); ignored on ports without the knob. |
 
 ```toml
@@ -126,7 +127,9 @@ power_save = false                  # default; eliminates ~30-100 ms tick spikes
 
 The `power_save = false` default matters on Pi Pico W: the CYW43 chip's idle power-save mode introduces 30–100 ms tick stalls, which visibly stutter LED-blink rhythms and can break sub-second control loops.
 
-`tx_power_dbm` exists for boards that are unreliable at full transmit power. The canonical case is Unexpected Maker's P4-revision ESP32-S3 boards, which are [vendor-documented unstable](https://help.unexpectedmaker.com/docs/boards/wifi-stability-issues/) at full 20 dBm.  Dropping to `tx_power_dbm = 15` (~75 %) restores a clean join. This knowledge lives in your deploy config, not in the library: `chumicro-wifi` never inspects the board, it only applies the value you set and leaves the radio at its firmware default when the key is absent.
+`tx_power_dbm` exists for boards that are unreliable at full transmit power. The motivating case is Unexpected Maker's P4-revision ESP32-S3 boards, which are [vendor-documented unstable](https://help.unexpectedmaker.com/docs/boards/wifi-stability-issues/) at full 20 dBm.  Dropping to `tx_power_dbm = 15` (~75 %) restores a clean join. This knowledge lives in your deploy config, not in the library: `chumicro-wifi` never inspects the board, it only applies the value you set and leaves the radio at its firmware default when the key is absent.
+
+`first_connect_timeout_ms` exists for the cold start. The first association after power-up runs longer than the reconnects that follow, and without a grace it can exhaust `connect_timeout_ms`, count a failure toward `reconnect_max`, and burn a backoff delay before the now-warm radio joins on the retry. Set it above `connect_timeout_ms` (say `45_000` against the default `15_000`) and only the first dispatched attempt uses it; the supervisor hands every later attempt `connect_timeout_ms`, so steady-state reconnect behavior is unchanged.
 
 ### `reconnect_max` and the never-restart guarantee
 
@@ -142,7 +145,7 @@ runner.add(wifi)
 runner.tick()             # advances every registered service one step
 ```
 
-`check` is cheap (state inspection); `handle` performs at most one wifi-driver call per tick.  On MicroPython that call is non-blocking: association happens in the background and `handle()` returns immediately, so other services keep their tick budget.  On CircuitPython the substrate-level `wifi.radio.connect()` is itself blocking, so `handle()` stalls for up to `connect_timeout_ms` (default 15 000 ms) while in `CONNECTING` / `RECONNECTING`.  Other services in the same `Runner` (LED heartbeat, an in-flight HTTP request, MQTT keep-alives) pause for that window.  Once `CONNECTED`, every tick is cheap on both runtimes, and connection failures land in `RECONNECTING`, with the next backoff window resuming naturally.
+`check` is cheap (state inspection); `handle` performs at most one wifi-driver call per tick.  On MicroPython that call is non-blocking: association happens in the background and `handle()` returns immediately, so other services keep their tick budget.  On CircuitPython the substrate-level `wifi.radio.connect()` is itself blocking, so `handle()` stalls for up to `connect_timeout_ms` (default 15 000 ms; the first attempt uses `first_connect_timeout_ms` when set) while in `CONNECTING` / `RECONNECTING`.  Other services in the same `Runner` (LED heartbeat, an in-flight HTTP request, MQTT keep-alives) pause for that window.  Once `CONNECTED`, every tick is cheap on both runtimes, and connection failures land in `RECONNECTING`, with the next backoff window resuming naturally.
 
 ## Adapter detection
 
@@ -152,7 +155,7 @@ runner.tick()             # advances every registered service one step
 |---|---|---|
 | CircuitPython | `CpWifiAdapter` (uses `wifi.radio`) | `_adapters/cp.py` |
 | MicroPython | `MpWifiAdapter` (handles ESP32 + CYW43) | `_adapters/mp.py` |
-| CPython | `FakeWifiAdapter` | `testing.py` |
+| CPython | `CpythonWifiAdapter` (host stand-in, reports success immediately) | `_adapters/cpython.py` |
 
 The `MpWifiAdapter` auto-detects ESP-IDF vs CYW43 by matching `sys.implementation._machine` against a positive whitelist of known CYW43 boards (`CYW43_MACHINES` in `_adapters/mp.py`); anything outside the whitelist falls through to ESP-IDF.  It then applies the right `wlan.config(...)` knobs:
 

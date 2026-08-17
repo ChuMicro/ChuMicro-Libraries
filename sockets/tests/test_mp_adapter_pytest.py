@@ -98,6 +98,10 @@ def mp_adapter() -> Iterator[types.ModuleType]:
         def settimeout(self, seconds: float | None) -> None:
             self._timeout = seconds
 
+        def write(self, data: bytes) -> int:
+            # Post-handshake stream write.
+            return len(data)
+
         def fileno(self) -> int:
             return self._fileno
 
@@ -119,8 +123,13 @@ def mp_adapter() -> Iterator[types.ModuleType]:
             sock: object,
             *,
             server_hostname: str,
+            do_handshake_on_connect: bool = True,
         ) -> object:
+            # Mirrors MP 1.27's mbedTLS signature: the deferred-handshake
+            # kwarg is accepted and recorded.
             self.wrapped.append((sock, server_hostname))
+            self.deferred_handshakes = getattr(self, "deferred_handshakes", [])
+            self.deferred_handshakes.append(do_handshake_on_connect)
             return sock
 
         def load_verify_locations(self, *, cadata: bytes | str) -> None:
@@ -195,12 +204,13 @@ def _connect(
     """Drive ``mp_adapter.connector`` to ``ready``; return the wrapped socket.
 
     The stubbed ``select.poll`` reports POLLOUT immediately, so the
-    drive completes in at most four ticks (DNS, dial, poll-ready
-    [+ TLS promote]).  Raises AssertionError if the connector fails —
-    the stub substrate never legitimately fails.
+    drive completes in a handful of ticks (DNS, dial, poll-ready, then
+    for TLS the stub's two handshake flights plus the promote tick).
+    Raises AssertionError if the connector fails — the stub substrate
+    never legitimately fails.
     """
     mp_connector = mp_adapter.connector(host, port, tls=tls, context=context)
-    for _ in range(6):
+    for _ in range(10):
         if mp_connector.state in ("ready", "failed"):
             break
         mp_connector.tick(0)
