@@ -8,7 +8,7 @@
         "compat/examples/partial_keyword_override.py"
       ],
       "readme_path": "compat/README.md",
-      "version": "0.3.4"
+      "version": "0.3.5"
     },
     "chumicro_config": {
       "description": "Standardized runtime-config helpers for ChuMicro libraries: section loader plus on-device runtime-config reader.",
@@ -16,7 +16,7 @@
         "config/examples/end_to_end.py"
       ],
       "readme_path": "config/README.md",
-      "version": "0.7.6"
+      "version": "0.7.7"
     },
     "chumicro_http_server": {
       "description": "Non-blocking HTTP/1.1 server for CircuitPython, MicroPython, and CPython.",
@@ -25,7 +25,7 @@
         "http_server/examples/simple_server.py"
       ],
       "readme_path": "http_server/README.md",
-      "version": "0.21.1"
+      "version": "0.21.2"
     },
     "chumicro_kvstore": {
       "description": "Tiny mutable key-value store for persisted runtime state (counters, timestamps, tokens) across CircuitPython, MicroPython, and CPython.",
@@ -33,7 +33,7 @@
         "kvstore/examples/boot_counter.py"
       ],
       "readme_path": "kvstore/README.md",
-      "version": "0.3.5"
+      "version": "0.3.6"
     },
     "chumicro_mqtt": {
       "description": "Non-blocking MQTT 3.1.1 client (QoS 0+1) for CircuitPython, MicroPython, and CPython.",
@@ -45,7 +45,7 @@
         "mqtt/examples/telemetry.py"
       ],
       "readme_path": "mqtt/README.md",
-      "version": "0.30.1"
+      "version": "0.30.2"
     },
     "chumicro_msgpack": {
       "description": "Compact MessagePack serialization for CircuitPython, MicroPython, and CPython: delegates to the native C module when available.",
@@ -56,7 +56,7 @@
         "msgpack/examples/stream_roundtrip.py"
       ],
       "readme_path": "msgpack/README.md",
-      "version": "0.2.6"
+      "version": "0.2.7"
     },
     "chumicro_ntp": {
       "description": "Runner-shaped SNTP client over an injected UDP socket: pure Python, cross-runtime.",
@@ -65,7 +65,7 @@
         "ntp/examples/ntp_query.py"
       ],
       "readme_path": "ntp/README.md",
-      "version": "0.15.1"
+      "version": "0.15.2"
     },
     "chumicro_requests": {
       "description": "Non-blocking HTTP/1.1 client for CircuitPython, MicroPython, and CPython.",
@@ -75,7 +75,7 @@
         "requests/examples/periodic_get.py"
       ],
       "readme_path": "requests/README.md",
-      "version": "0.21.1"
+      "version": "0.21.2"
     },
     "chumicro_runner": {
       "description": "Tick-based task runner for CircuitPython, MicroPython, and CPython: non-blocking check/handle scheduling without async.",
@@ -92,7 +92,7 @@
         "runner/examples/sensor_threshold.py"
       ],
       "readme_path": "runner/README.md",
-      "version": "0.22.1"
+      "version": "0.22.2"
     },
     "chumicro_sockets": {
       "description": "Cross-runtime TCP, TLS, and UDP sockets for CircuitPython, MicroPython, and CPython",
@@ -103,7 +103,7 @@
         "sockets/examples/udp_echo_client.py"
       ],
       "readme_path": "sockets/README.md",
-      "version": "0.21.2"
+      "version": "0.21.3"
     },
     "chumicro_timing": {
       "description": "Wraparound-safe millisecond tick helpers plus wait value objects (deadlines, rates, signals) for CircuitPython, MicroPython, and CPython.",
@@ -120,7 +120,7 @@
         "timing/examples/timeout_check.py"
       ],
       "readme_path": "timing/README.md",
-      "version": "0.8.3"
+      "version": "0.8.4"
     },
     "chumicro_websockets": {
       "description": "Non-blocking WebSocket (RFC 6455) client and server for CircuitPython, MicroPython, and CPython.",
@@ -131,7 +131,7 @@
         "websockets/examples/server.py"
       ],
       "readme_path": "websockets/README.md",
-      "version": "0.27.1"
+      "version": "0.27.2"
     },
     "chumicro_wifi": {
       "description": "Unified wifi supervisor across CircuitPython, MicroPython, and CPython: sole-supervisor model with reconnect, state machine, and per-runtime adapters.",
@@ -139,8 +139,8 @@
         "wifi/examples/connect_to_ap.py"
       ],
       "readme_path": "wifi/README.md",
-      "version": "0.11.1"
+      "version": "0.11.2"
     }
   },
-  "tag": "20260818.005506"
+  "tag": "20260818.133333"
 }
